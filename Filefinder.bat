@@ -12,7 +12,7 @@ REM extracts --add-binary files into for --onedir builds) - there's no
 REM "set folder containing ddjvu.exe" button/step needed after this.
 REM
 REM Edit the paths below if your djvulibre binaries live somewhere
-REM other than resources\djvulibre\.
+REM other than C:\PyLatexProj\Filefinder\.
 REM
 REM NOTE: this doesn't pin a PyInstaller version, so it builds with
 REM whatever PyInstaller is currently installed. The "_internal"
@@ -30,18 +30,20 @@ setlocal
 cd /d "%~dp0"
 
 pyinstaller --clean --noconfirm --windowed ^
+    --hidden-import fitz ^
+    --hidden-import pymupdf ^
     --add-data "resources;resources" ^
-    --add-binary "resources\djvulibre\libdjvulibre.dll;." ^
-    --add-binary "resources\djvulibre\libdjvulibre-21.dll;." ^
-    --add-binary "resources\djvulibre\libgcc_s_seh-1.dll;." ^
-    --add-binary "resources\djvulibre\libjpeg.dll;." ^
-    --add-binary "resources\djvulibre\libstdc++-6.dll;." ^
-    --add-binary "resources\djvulibre\libtiff.dll;." ^
-    --add-binary "resources\djvulibre\libwinpthread-1.dll;." ^
-    --add-binary "resources\djvulibre\libz.dll;." ^
-    --add-binary "resources\djvulibre\ddjvu.exe;." ^
-    --add-binary "resources\djvulibre\djvused.exe;." ^
-    --add-binary "resources\djvulibre\djvutxt.exe;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libdjvulibre.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libdjvulibre-21.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libgcc_s_seh-1.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libjpeg.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libstdc++-6.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libtiff.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libwinpthread-1.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libz.dll;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\ddjvu.exe;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\djvused.exe;." ^
+    --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\djvutxt.exe;." ^
     --icon "resources\icon.ico" ^
     --name "Filefinder" ^
     main.py
