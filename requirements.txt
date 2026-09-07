@@ -1,0 +1,35 @@
+# Tested combination that still ships 32-bit ("win32") wheels and works
+# on Windows 7 SP1 (32-bit or 64-bit):
+#
+#   Python 3.8.10 32-bit  <- last official Python installer supporting Win7
+#   PyQt5 5.15.11         <- last PyQt5 release with a win32 wheel
+#
+# Install with:
+#   pip install -r requirements.txt
+
+PyQt5==5.15.11
+send2trash==1.8.3
+pyinstaller==6.22.2
+
+
+# --- Optional, needed for the new features ---------------------------------
+# Native Explorer right-click menu ("Show Windows context menu..."). Windows
+# only; the rest of the app works fine without it, the menu item just won't
+# appear.
+pywin32==306
+
+# PDF preview pane. PyMuPDF dropped 32-bit Windows wheels after 1.18.x, so
+# on Windows 7 32-bit / Python 3.8 pin the older release below. On 64-bit
+# Windows you can use a newer PyMuPDF instead.
+PyMuPDF==1.18.19
+
+# DJVU preview does NOT need a pip package: it shells out to the djvulibre
+# command line tools (ddjvu.exe, djvused.exe). Filefinder.bat bundles these
+# automatically; running from source, put them in resources/djvulibre/ (see
+# README.md) or on the PATH instead.
+
+# .docx preview pane (formatted paragraphs, headings, tables). Files with
+# other extensions (including legacy .doc) fall back to a plain-text
+# preview or an explanatory message instead - this package is only needed
+# for .docx specifically.
+python-docx>=0.8.11
