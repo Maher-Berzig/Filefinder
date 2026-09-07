@@ -102,6 +102,7 @@ def main():
     # with no way to reach it.
     if not (tray_start and window.tray_icon is not None):
         window.show()
+        window.showMaximized()
 
     sys.exit(app.exec_())
 
