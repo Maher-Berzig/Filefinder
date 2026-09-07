@@ -141,6 +141,8 @@ class MainWindow(QMainWindow):
         enter_shortcut.activated.connect(self._start_search)
         esc_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         esc_shortcut.activated.connect(self._stop_search)
+        filters_shortcut = QShortcut(QKeySequence(Qt.Key_F12), self)
+        filters_shortcut.activated.connect(self._toggle_filters)        
 
     def _build_search_row(self):
         layout = QHBoxLayout()
@@ -221,7 +223,7 @@ class MainWindow(QMainWindow):
         # preview/table area instead of just moving the button there.
         self.filters_toggle_btn = QToolButton()
         self.filters_toggle_btn.setIconSize(QSize(14, 14))
-        self.filters_toggle_btn.setToolTip("Show/hide Filters and Options")
+        self.filters_toggle_btn.setToolTip("Show/hide Filters and Options (F12)")
         self.filters_toggle_btn.clicked.connect(self._toggle_filters)
         layout.addWidget(self.filters_toggle_btn)
 
@@ -232,12 +234,12 @@ class MainWindow(QMainWindow):
         self.filters_box = box
         outer = QVBoxLayout(box)
         outer.setSpacing(8)
-        outer.setContentsMargins(10, 14, 10, 10)
+        outer.setContentsMargins(10, 10, 10, 10)
 
         def row_layout():
             lay = QHBoxLayout()
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(10)
+            lay.setSpacing(5)
             return lay
 
         # Line 1: Match case / Whole words / Accents; Modified: [..] from [] To []
@@ -265,7 +267,7 @@ class MainWindow(QMainWindow):
         # code used by _gather_params()/_on_date_mode_changed(), so the
         # currently selected mode's *meaning* never changes when the
         # display language is switched.
-        self.date_combo = QComboBox()
+        self.date_combo = QComboBox()        
         for code, key, default in (
                 ("any", "date_any_time", "Any time"),
                 ("today", "date_today", "Today"),
@@ -412,9 +414,9 @@ class MainWindow(QMainWindow):
         idx = self.language_combo.findData(DEFAULT_LANGUAGE)
         self.language_combo.setCurrentIndex(idx if idx != -1 else 0)
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
-        history_row.addWidget(self.language_combo)
+        history_row.addWidget(self.language_combo, stretch=1)
 
-        history_row.addStretch(1)
+        #history_row.addStretch(1)
         layout.addLayout(history_row)
 
         self.font_btn = QPushButton(tr.get("choose_font", "Choose Font..."))
@@ -952,11 +954,21 @@ class MainWindow(QMainWindow):
                 send2trash(path)
             except ImportError:
                 os.remove(path)
-            row = self.table.currentRow()
-            self.table.removeRow(row)
+            self._remove_row_for_path(path)
             self.status_label.setText("Deleted: %s" % path)
         except Exception as exc:
             QMessageBox.warning(self, "Delete failed", str(exc))
+
+    def _remove_row_for_path(self, path):
+        """Removes whichever row currently holds `path`, found by content
+        rather than by index - the row index alone isn't reliable here
+        since the table can resort/refresh while the confirmation dialog
+        in _delete_selected() is open."""
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.UserRole) == path:
+                self.table.removeRow(row)
+                return
 
     def _show_context_menu(self, pos):
         if self.table.rowCount() == 0:
@@ -1001,11 +1013,13 @@ class MainWindow(QMainWindow):
                 if items:
                     menu.addSeparator()
 
-                    def invoke(cmd_id, _cm=context_menu_obj, _hwnd=hwnd):
+                    def invoke(cmd_id, _cm=context_menu_obj, _hwnd=hwnd, _paths=list(selected_paths)):
                         ok, ierr = native_context_menu.invoke_command(_cm, _hwnd, cmd_id)
                         if not ok:
                             QMessageBox.warning(self, "Action failed", ierr)
-
+                            return
+                        self._refresh_rows_after_native_action(_paths)
+                        
                     self._populate_native_menu(menu, items, invoke)
             elif err:
                 menu.addSeparator()
@@ -1016,6 +1030,20 @@ class MainWindow(QMainWindow):
 
         if hmenu is not None:
             native_context_menu.destroy_menu(hmenu)
+
+    def _refresh_rows_after_native_action(self, paths):
+        """The native Explorer menu (Delete, and anything else that can
+        change files on disk) runs entirely inside the shell - File Finder
+        gets no notification when it's done, so after any native command
+        runs, drop the rows for whichever of the paths that were selected
+        no longer exist on disk."""
+        missing = {p for p in paths if not os.path.exists(p)}
+        if not missing:
+            return
+        for row in range(self.table.rowCount() - 1, -1, -1):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.UserRole) in missing:
+                self.table.removeRow(row)
 
     def _populate_native_menu(self, qmenu, items, invoke_callback):
         """Recursively add the shell menu's items/submenus as QActions,
@@ -1074,7 +1102,7 @@ class MainWindow(QMainWindow):
                 self._restore_from_tray()
 
     def _restore_from_tray(self):
-        self.showNormal()
+        self.showMaximized()
         self.raise_()
         self.activateWindow()
 

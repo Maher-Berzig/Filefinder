@@ -67,7 +67,7 @@ translations = {
         "date_past_7": "Past 7 days",
         "date_past_30": "Past 30 days",
         "date_this_year": "This year",
-        "date_custom_range": "Custom range",
+        "date_custom_range": "Custom dates",
         "from_label": "from",
         "to_label": "To",
         "file_type_label": "File Type",
@@ -86,7 +86,7 @@ translations = {
         "any_word": "Any word",
         "no_words": "No words",
         "no_words_placeholder": "words to exclude, or \"exact phrase\" to exclude",
-        "search_placeholder": "Type a file name, part of a name (accents optional), wildcard (*iric, report*.pdf) or regex, or pick from history...",
+        "search_placeholder": "Type a file name, part of a name (accents optional), wildcard (report*.pdf) or regex, or pick from history...",
 
         # Options box
         "options_title": "Options",
@@ -122,10 +122,12 @@ translations = {
         # System tray
         "tray_show": "Show File Finder",
         "tray_exit": "Exit",
+
     },
     "ar": {
         "app_title": "باحث الملفات - بحث سريع عن الملفات",
 
+        # Search row
         "search_label": "بحث:",
         "mode_contains": "يحتوي على",
         "mode_wildcard": "حرف بدل (*, ?)",
@@ -133,6 +135,7 @@ translations = {
         "search_btn": "بحث",
         "stop_btn": "إيقاف",
 
+        # Look in row
         "look_in_label": "البحث في:",
         "browse_btn": "استعراض...",
         "include_subfolders": "تضمين المجلدات الفرعية",
@@ -140,6 +143,7 @@ translations = {
         "rebuild_index": "إعادة بناء الفهرس",
         "show_preview": "إظهار المعاينة",
 
+        # Filters box
         "filters_title": "المرشحات",
         "match_case": "مطابقة حالة الأحرف",
         "whole_words": "كلمات كاملة",
@@ -150,7 +154,7 @@ translations = {
         "date_past_7": "آخر 7 أيام",
         "date_past_30": "آخر 30 يومًا",
         "date_this_year": "هذه السنة",
-        "date_custom_range": "نطاق مخصص",
+        "date_custom_range": "تواريخ مخصصة",
         "from_label": "من",
         "to_label": "إلى",
         "file_type_label": "نوع الملف",
@@ -169,8 +173,9 @@ translations = {
         "any_word": "أي كلمة",
         "no_words": "بدون كلمات",
         "no_words_placeholder": "كلمات لاستبعادها، أو \"عبارة مطابقة\" لاستبعادها",
-        "search_placeholder": "اكتب اسم ملف، جزءًا من اسم (اللكنات اختيارية)، حرف بدل (*iric، report*.pdf) أو تعبير نمطي، أو اختر من السجل...",
+        "search_placeholder": "اكتب اسم ملف، جزءًا من اسم (اللكنات اختيارية)، حرف بدل (report*.pdf) أو تعبير نمطي، أو اختر من السجل...",
 
+        # Options box
         "options_title": "الخيارات",
         "clear_history": "مسح السجل",
         "history_size_label": "حجم السجل:",
@@ -179,34 +184,144 @@ translations = {
         "default_btn": "افتراضي",
         "about_btn": "حول",
 
+        # Results table
         "col_name": "الاسم",
         "col_folder": "المجلد",
         "col_size": "الحجم",
         "col_type": "النوع",
         "col_date_modified": "تاريخ التعديل",
 
+        # Status bar
         "status_ready": "جاهز",
 
+        # Preview pane
         "preview_title": "معاينة",
         "preview_select_file": "اختر ملفًا لمعاينته هنا.",
         "preview_file_not_found": "الملف غير موجود.",
 
+        # Context menu
         "menu_open": "فتح",
         "menu_open_folder": "فتح المجلد الحاوي",
         "menu_copy_path": "نسخ المسار الكامل",
         "menu_copy_name": "نسخ اسم الملف",
         "menu_delete": "حذف (سلة المحذوفات)",
 
+        # System tray
         "tray_show": "إظهار باحث الملفات",
         "tray_exit": "خروج",
+
+        # Friendly, native-script names shown in the Language dropdown, keyed by
+        # the same language codes used in `translations` above.
+        "en": "English",
+        "ar": "العربية",
+
+        # Reading direction for each language - "rtl" flips the whole UI mirror-
+        # image (labels/buttons swap sides, text and editable fields align to
+        # the right), the way Windows Explorer, Office, etc. do for Arabic.
+        # Add "rtl" here for any future right-to-left language (Hebrew, Farsi,
+        # Urdu...); everything else defaults to "ltr".
+        "en": "ltr",
+        "ar": "rtl",
+
+        # Shared singleton - import this everywhere the UI needs translated text.
+    },
+    "fr": {
+        "app_title": "File Finder - recherche rapide de fichiers",
+
+        # Search row
+        "search_label": "Recherche:",
+        "mode_contains": "Contient",
+        "mode_wildcard": "Caractère générique (*, ?)",
+        "mode_regex": "Regex",
+        "search_btn": "Recherche",
+        "stop_btn": "Arrêt",
+
+        # Look in row
+        "look_in_label": "Regarder dans:",
+        "browse_btn": "Parcourir...",
+        "include_subfolders": "Inclure les sous-dossiers",
+        "use_index": "Utiliser l'index enregistré (plus rapide)",
+        "rebuild_index": "Reconstruire l'index",
+        "show_preview": "Afficher l'aperçu",
+
+        # Filters box
+        "filters_title": "Filtres",
+        "match_case": "Correspondance des mots",
+        "whole_words": "Des mots entiers",
+        "accents": "Accents",
+        "modified_label": "Modifié:",
+        "date_any_time": "À tout moment",
+        "date_today": "Aujourd'hui",
+        "date_past_7": "7 derniers jours",
+        "date_past_30": "30 derniers jours",
+        "date_this_year": "Cette année",
+        "date_custom_range": "Dates personnalisée",
+        "from_label": "depuis",
+        "to_label": "À",
+        "file_type_label": "Type de fichier",
+        "min_label": "Min",
+        "max_label": "Maximum",
+        "ext_all_files": "Tous les fichiers",
+        "ext_documents": "Documents",
+        "ext_images": "Images",
+        "ext_music": "Musique",
+        "ext_video": "Vidéo",
+        "ext_archives": "Archives",
+        "ext_executables": "Exécutables",
+        "names_containing": "Noms de fichiers contenant :",
+        "all_words": "Tous les mots",
+        "exact_phrase": "Expression exacte",
+        "any_word": "N'importe quel mot",
+        "no_words": "Pas de mots",
+        "no_words_placeholder": "mots à exclure ou \"expression exacte\" à exclure",
+        "search_placeholder": "Saisissez un nom de fichier, une partie d'un nom (accents facultatifs), un caractère générique (report*.pdf) ou une expression régulière, ou choisissez dans l'historique...",        
+
+        # Options box
+        "options_title": "Options",
+        "clear_history": "Effacer l'historique",
+        "history_size_label": "Taille de l'historique :",
+        "language_label": "Langue:",
+        "choose_font": "Choisissez la police...",
+        "default_btn": "Défaut",
+        "about_btn": "À propos de",
+
+        # Results table
+        "col_name": "Nom",
+        "col_folder": "Dossier",
+        "col_size": "Taille",
+        "col_type": "Taper",
+        "col_date_modified": "Date de modification",
+
+        # Status bar
+        "status_ready": "Prêt",
+
+        # Preview pane
+        "preview_title": "Aperçu",
+        "preview_select_file": "Sélectionnez un fichier pour le prévisualiser ici.",
+        "preview_file_not_found": "Fichier introuvable.",
+
+        # Context menu
+        "menu_open": "Ouvrir",
+        "menu_open_folder": "Ouvrir le dossier contenant",
+        "menu_copy_path": "Copier le chemin complet",
+        "menu_copy_name": "Copier le nom du fichier",
+        "menu_delete": "Supprimer (Corbeille)",
+
+        # System tray
+        "tray_show": "Afficher l'outil de recherche de fichiers",
+        "tray_exit": "Sortie",
+
     },
 }
+
+
 
 # Friendly, native-script names shown in the Language dropdown, keyed by
 # the same language codes used in `translations` above.
 LANGUAGE_NAMES = {
     "en": "English",
     "ar": "العربية",
+    "fr": "Français",
 }
 
 # Reading direction for each language - "rtl" flips the whole UI mirror-

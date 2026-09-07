@@ -30,7 +30,7 @@ import sys
 import time
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QSize, QRectF, QPointF
-from PyQt5.QtGui import QPixmap, QKeySequence, QIcon, QPainter, QPen, QColor, QPolygonF, QFontDatabase
+from PyQt5.QtGui import QPixmap, QKeySequence, QIcon, QPainter, QPen, QColor, QPolygonF, QFontDatabase, QTransform
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSpinBox, QSizePolicy, QToolButton, QButtonGroup, QShortcut, QTextEdit,
@@ -169,7 +169,84 @@ def _magnifier_icon(sign, size=18):
     p.end()
     return QIcon(pm)
 
+import math
+from PyQt5.QtCore import Qt, QRectF, QPointF
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QIcon
 
+def _rotate_icon(direction, size=18):
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+
+    if direction == "left":
+        p.translate(size, 0)
+        p.scale(-1, 1)
+
+    color = QColor(90, 90, 90)
+    pen = QPen(color)
+    pen.setWidthF(size * 0.12)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+
+    cx, cy = size * 0.5, size * 0.5
+    r = size * 0.32
+    start_deg = 100
+    sweep_deg = 260
+    rect = QRectF(cx - r, cy - r, r * 2, r * 2)
+    p.drawArc(rect, int(start_deg * 16), int(sweep_deg * 16))
+
+    # 1. Find the tip of the arc
+    end_angle_rad = math.radians(start_deg + sweep_deg)
+    tip = QPointF(cx + r * math.cos(end_angle_rad), cy - r * math.sin(end_angle_rad))
+
+    # -------------------------------------------------------------------------
+    # ADJUST THESE PARAMETERS:
+    # -------------------------------------------------------------------------
+    # arrow_rotation_offset: 
+    #   0 = Perfectly aligned with the arc's path.
+    #   Positive values (e.g. 10, 20) = Rotates arrowhead clockwise.
+    #   Negative values (e.g. -10, -20) = Rotates arrowhead counter-clockwise.
+    arrow_rotation_offset = 200 
+    
+    
+    # wing_spread: 
+    #   Controls how "open" the V is. 30 is narrow, 60 is wide.
+    wing_spread = 30 
+    
+    # head_length:
+    #   How long the arrowhead wings are.
+    head_length = size * 0.22
+    # -------------------------------------------------------------------------
+
+    # Calculate travel direction + your custom offset
+    # Base tangent for clockwise arc is (sin, -cos)
+    base_angle = end_angle_rad + math.radians(arrow_rotation_offset)
+    tx = math.sin(base_angle)
+    ty = -math.cos(base_angle)
+
+    # Rotate tangent by wing_spread to get the two wings
+    def rotate_vec(vx, vy, angle_deg):
+        rad = math.radians(angle_deg)
+        return (vx * math.cos(rad) - vy * math.sin(rad),
+                vx * math.sin(rad) + vy * math.cos(rad))
+
+    v1_x, v1_y = rotate_vec(tx, ty, wing_spread)
+    v2_x, v2_y = rotate_vec(tx, ty, -wing_spread)
+
+    p1 = QPointF(tip.x() + v1_x * head_length, tip.y() + v1_y * head_length)
+    p2 = QPointF(tip.x() + v2_x * head_length, tip.y() + v2_y * head_length)
+
+    p.drawLine(p1, tip)
+    p.drawLine(tip, p2)
+
+    p.end()
+    return QIcon(pm)
+
+
+
+    
 def _make_nav_button(icon=None, text=None, tooltip="", checkable=False):
     """A QToolButton sized/iconned consistently with the rest of the
     preview pane's header row, so every button ends up the same width."""
@@ -538,6 +615,7 @@ class PreviewPane(QWidget):
         self.page_index = 0
         self.page_count = 0
         self.zoom_factor = 1.0
+        self.rotation_angle = 0   # 0/90/180/270, clockwise
         self._last_aspect_ratio = 1.294  # sane default (~A4) until a page renders
         self.view_mode = self.settings.value("preview_view_mode", "single")
         if self.view_mode not in ("single", "continuous"):
@@ -614,6 +692,16 @@ class PreviewPane(QWidget):
             icon=_magnifier_icon("+"), tooltip="Zoom in (Ctrl++)")
         self.zoom_in_btn.clicked.connect(self.zoom_in)
         header.addWidget(self.zoom_in_btn)
+        
+        self.rotate_left_btn = _make_nav_button(
+            icon=_rotate_icon("left"), tooltip="Rotate right")
+        self.rotate_left_btn.clicked.connect(self.rotate_right)
+        header.addWidget(self.rotate_left_btn)
+
+        self.rotate_right_btn = _make_nav_button(
+            icon=_rotate_icon("right"), tooltip="Rotate left")
+        self.rotate_right_btn.clicked.connect(self.rotate_left)
+        header.addWidget(self.rotate_right_btn)      
 
         header.addStretch(1)
 
@@ -700,12 +788,15 @@ class PreviewPane(QWidget):
         self.page_spin.setVisible(visible)
         self.page_count_label.setVisible(visible)
 
+
     def _set_paged_controls_visible(self, visible):
         """Prev/Next/zoom/fit/Continuous/Single only make sense for
         page-based content (PDF/DJVU) - hide the lot for .docx/text."""
         self._set_nav_visible(visible and self.view_mode == "single")
-        for widget in (self.zoom_out_btn, self.zoom_in_btn, self.fit_width_btn,
-                       self.fit_window_btn, self.continuous_btn, self.single_btn):
+        for widget in (self.zoom_out_btn, self.zoom_in_btn,
+                       self.rotate_left_btn, self.rotate_right_btn,
+                       self.fit_width_btn, self.fit_window_btn,
+                       self.continuous_btn, self.single_btn):
             widget.setVisible(visible)
 
     def _set_content_widget(self, mode):
@@ -958,6 +1049,8 @@ class PreviewPane(QWidget):
         # keeps the result sharp instead of blurry.
         if pixmap.width() != target_device_width:
             pixmap = pixmap.scaledToWidth(target_device_width, Qt.SmoothTransformation)
+        if self.rotation_angle:
+            pixmap = pixmap.transformed(QTransform().rotate(self.rotation_angle), Qt.SmoothTransformation)
         pixmap.setDevicePixelRatio(dpr)
         return pixmap
 
@@ -1244,7 +1337,16 @@ class PreviewPane(QWidget):
             return
         self.zoom_factor = factor
         self._refresh_for_new_render_settings()
+    # ------------------------------------------------------------------
+    # Rotate
+    # ------------------------------------------------------------------
+    def rotate_left(self):
+        self.rotation_angle = (self.rotation_angle - 90) % 360
+        self._refresh_for_new_render_settings()
 
+    def rotate_right(self):
+        self.rotation_angle = (self.rotation_angle + 90) % 360
+        self._refresh_for_new_render_settings()
     # ------------------------------------------------------------------
     # Resize / re-render
     # ------------------------------------------------------------------
