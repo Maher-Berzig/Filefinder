@@ -283,10 +283,13 @@ def read_menu_items(hmenu, context_menu=None):
     return items
 
 
-# def invoke_command(context_menu, hwnd, cmd_id):
+def invoke_command(context_menu, hwnd, cmd_id):
+    """Run the command with the given absolute menu id (as read from
+    read_menu_items()'s "id" field), exactly like Explorer would."""
     invoke_info = (0, hwnd, cmd_id - IDCMD_FIRST, None, None, 0, 0, 0)
     context_menu.InvokeCommand(invoke_info)
     return True, ""
+
 
 def destroy_menu(hmenu):
     if hmenu:
