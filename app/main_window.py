@@ -1,7 +1,9 @@
 import os
+import struct
+import sys
 import time
 
-from PyQt5.QtCore import Qt, QSettings, QDate, QDateTime, QSize
+from PyQt5.QtCore import Qt, QSettings, QDate, QDateTime, QSize, QMimeData, QUrl
 from PyQt5.QtGui import QIcon, QKeySequence, QFont
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
@@ -10,13 +12,14 @@ from PyQt5.QtWidgets import (
     QMenu, QAction, QMessageBox, QGroupBox, QSpinBox, QDateEdit,
     QProgressBar, QStatusBar, QSplitter, QFileIconProvider, QShortcut,
     QCompleter, QApplication, QSystemTrayIcon, QStyle, QToolButton,
-    QFontDialog, QButtonGroup,
+    QFontDialog, QButtonGroup, QListView, QTreeView,
 )
 from PyQt5.QtCore import QFileInfo, QStringListModel
 
 from .search_worker import SearchWorker, IndexBuildWorker
 from .index_manager import IndexManager
 from .preview_pane import PreviewPane
+from .combo_widgets import HistoryComboBox, MultiSelectComboBox
 from . import native_context_menu
 from . import utils
 from .translations import tr, translations, LANGUAGE_NAMES, DEFAULT_LANGUAGE
@@ -137,8 +140,23 @@ class MainWindow(QMainWindow):
         self.status.addWidget(self.status_label, stretch=1)
         self.status.addPermanentWidget(self.progress_bar)
 
-        enter_shortcut = QShortcut(QKeySequence(Qt.Key_Return), self.search_edit)
-        enter_shortcut.activated.connect(self._start_search)
+        # Enter: opens the selected file(s) when the results table has
+        # focus, otherwise starts a search (as before). One shared
+        # handler for both keys - two shortcuts with the same key would
+        # be "ambiguous" and neither would fire.
+        for key in (Qt.Key_Return, Qt.Key_Enter):
+            enter_shortcut = QShortcut(QKeySequence(key), self)
+            enter_shortcut.activated.connect(self._on_enter_pressed)
+        # Ctrl+C / Ctrl+X on the results table put the selected files on
+        # the system clipboard so they can be pasted into Explorer.
+        # WidgetShortcut = only while the table has focus, so Ctrl+C/X
+        # still copy/cut text in the search box and other fields.
+        copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self.table)
+        copy_shortcut.setContext(Qt.WidgetShortcut)
+        copy_shortcut.activated.connect(self._copy_files_selected)
+        cut_shortcut = QShortcut(QKeySequence("Ctrl+X"), self.table)
+        cut_shortcut.setContext(Qt.WidgetShortcut)
+        cut_shortcut.activated.connect(self._cut_files_selected)
         esc_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         esc_shortcut.activated.connect(self._stop_search)
         filters_shortcut = QShortcut(QKeySequence(Qt.Key_F12), self)
@@ -149,9 +167,13 @@ class MainWindow(QMainWindow):
         self.search_label = QLabel(tr.get("search_label", "Search:"))
         layout.addWidget(self.search_label)
 
-        self.search_edit = QComboBox()
+        # HistoryComboBox instead of a plain QComboBox: every entry in
+        # the drop-down carries an "X" on its right that deletes just
+        # that one entry (Options > Clear history still wipes the lot).
+        self.search_edit = HistoryComboBox()
         self.search_edit.setEditable(True)
         self.search_edit.setInsertPolicy(QComboBox.NoInsert)
+        self.search_edit.itemRemoved.connect(self._on_search_history_removed)
         self.search_edit.lineEdit().setPlaceholderText(
             tr.get("search_placeholder",
                    "Type a file name, part of a name (accents optional), "
@@ -192,8 +214,16 @@ class MainWindow(QMainWindow):
         self.look_in_label = QLabel(tr.get("look_in_label", "Look in:"))
         layout.addWidget(self.look_in_label)
 
-        self.location_combo = QComboBox()
-        self.location_combo.setEditable(False)
+        # MultiSelectComboBox: each entry is a check box, so several
+        # folders can be searched in one go ("C:\\, D:\\"). The search
+        # worker and the index have always taken a *list* of roots, so
+        # nothing downstream needed changing for this.
+        self.location_combo = MultiSelectComboBox()
+        self.location_combo.lineEdit().setPlaceholderText(
+            tr.get("look_in_placeholder", "Tick one or more folders..."))
+        self.location_combo.setToolTip(
+            "Tick every folder/drive to search. The list stays open "
+            "while you tick - click elsewhere to close it.")
         self._populate_locations()
         layout.addWidget(self.location_combo, stretch=1)
 
@@ -507,6 +537,8 @@ class MainWindow(QMainWindow):
         self.stop_btn.setText(tr.get("stop_btn", "Stop"))
 
         self.look_in_label.setText(tr.get("look_in_label", "Look in:"))
+        self.location_combo.lineEdit().setPlaceholderText(
+            tr.get("look_in_placeholder", "Tick one or more folders..."))
         self.browse_btn.setText(tr.get("browse_btn", "Browse..."))
         self.subfolders_check.setText(tr.get("include_subfolders", "Include subfolders"))
         self.use_index_check.setText(tr.get("use_index", "Use saved index (faster)"))
@@ -563,36 +595,79 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Location helpers
     # ------------------------------------------------------------------
-    def _populate_locations(self):
-        self.location_combo.clear()
-        drives = utils.list_windows_drives()
-        for drive in drives:
-            self.location_combo.addItem(drive)
-        home = os.path.expanduser("~")
-        self.location_combo.addItem(home)
+    def _populate_locations(self, keep_selection=True):
+        """(Re)fill the "Look in" list with the drives, the home folder
+        and the remembered locations, keeping whatever was ticked."""
+        selected = self.location_combo.selected_paths() if keep_selection else []
+        self.location_combo.clear_paths()
+        for drive in utils.list_windows_drives():
+            self.location_combo.add_path(drive)
+        self.location_combo.add_path(os.path.expanduser("~"))
         for path in self._load_location_history():
-            if self.location_combo.findText(path) == -1:
-                self.location_combo.addItem(path)
+            self.location_combo.add_path(path)
+        if selected:
+            self.location_combo.set_selected_paths(selected)
+
+    def _selected_roots(self):
+        """Folders currently ticked in "Look in", normalized and
+        de-duplicated; falls back to the home folder if none are."""
+        roots = []
+        seen = set()
+        for path in self.location_combo.selected_paths():
+            path = os.path.normpath(path.strip())
+            key = os.path.normcase(path)
+            if path and key not in seen:
+                seen.add(key)
+                roots.append(path)
+        return roots or [os.path.expanduser("~")]
 
     def _set_location(self, folder):
-        """Insert (if needed) and select *folder* in the "Look in" combo,
-        and remember it in the location history - shared by Browse... and
-        by a folder path passed in on the command line (see README.md's
-        "Explorer context menu" section)."""
-        folder = os.path.normpath(folder)
-        if self.location_combo.findText(folder) == -1:
-            self.location_combo.insertItem(0, folder)
-        self.location_combo.setCurrentIndex(self.location_combo.findText(folder))
-        self._remember_location_history(folder)
+        """Select a single *folder* - used by the command line / the
+        Explorer "Open with File Finder" context menu (see README.md)."""
+        self._set_locations([folder])
 
-    def _browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Choose folder to search")
-        if folder:
+    def _set_locations(self, folders):
+        """Add (if needed) and tick exactly *folders* in the "Look in"
+        combo, and remember each in the location history."""
+        paths = []
+        for folder in folders:
+            if not folder:
+                continue
             # QFileDialog always returns "/"-separated paths, even on
             # Windows - normalize so the combo box (and everything
             # downstream) shows/uses native "\\" separators instead of
             # a mix of the two.
-            self._set_location(folder)
+            folder = os.path.normpath(folder)
+            self.location_combo.add_path(folder, at_top=True)
+            self._remember_location_history(folder)
+            paths.append(folder)
+        if paths:
+            self.location_combo.set_selected_paths(paths)
+
+    def _browse_folder(self):
+        """Pick one *or several* folders at once.
+
+        QFileDialog.getExistingDirectory() can only ever return a single
+        folder, so this builds the dialog by hand: Qt's own (non-native)
+        directory dialog is the one whose inner list/tree view can be
+        switched to extended selection, which is what makes
+        Ctrl/Shift-clicking several folders possible.
+        """
+        dialog = QFileDialog(self, tr.get("browse_title", "Choose folder(s) to search"))
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        current = self.location_combo.selected_paths()
+        if current and os.path.isdir(current[0]):
+            dialog.setDirectory(current[0])
+        for view in dialog.findChildren(QListView) + dialog.findChildren(QTreeView):
+            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        if dialog.exec_() != QFileDialog.Accepted:
+            return
+        folders = [f for f in dialog.selectedFiles() if f and os.path.isdir(f)]
+        if folders:
+            self._set_locations(folders)
 
     def handle_folder_request(self, folder):
         """Called when a *second* File Finder launch (e.g. another
@@ -618,16 +693,12 @@ class MainWindow(QMainWindow):
     # Search
     # ------------------------------------------------------------------
     def _gather_params(self):
-        root = self.location_combo.currentText().strip()
-        if not root:
-            root = os.path.expanduser("~")
-        # Normalize once, here, so every downstream consumer (live walk,
-        # index build, index search, and the "Folder" column it all ends
-        # up displayed in) agrees on one separator style instead of
-        # mixing "/" (however the user typed/pasted it) with the "\\"
+        # Every ticked folder, normalized once here so that every
+        # downstream consumer (live walk, index build, index search, and
+        # the "Folder" column it all ends up displayed in) agrees on one
+        # separator style instead of mixing "/" with the "\\"
         # os.walk()/os.path.join() add for subfolders.
-        root = os.path.normpath(root)
-        roots = [root]
+        roots = self._selected_roots()
 
         mode = self.mode_combo.currentData()
 
@@ -724,7 +795,7 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
-        self.status_label.setText("Searching in %s ..." % params["roots"][0])
+        self.status_label.setText("Searching in %s ..." % ", ".join(params["roots"]))
         self.search_worker.start()
 
     def _stop_search(self):
@@ -799,12 +870,12 @@ class MainWindow(QMainWindow):
     # Index building
     # ------------------------------------------------------------------
     def _rebuild_index(self):
-        root = self.location_combo.currentText().strip() or os.path.expanduser("~")
+        roots = self._selected_roots()
         answer = QMessageBox.question(
             self, "Rebuild index",
             "This will scan '%s' and all its subfolders and save the file "
             "list for faster future searches. This can take a while for "
-            "large drives. Continue?" % root,
+            "large drives. Continue?" % ", ".join(roots),
             QMessageBox.Yes | QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
@@ -812,9 +883,9 @@ class MainWindow(QMainWindow):
         self.rebuild_index_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
-        self.status_label.setText("Building index for %s ..." % root)
+        self.status_label.setText("Building index for %s ..." % ", ".join(roots))
 
-        self.index_worker = IndexBuildWorker([root])
+        self.index_worker = IndexBuildWorker(roots)
         self.index_worker.progress.connect(
             lambda n, path: self.status_label.setText("Indexing... %d files scanned" % n))
         self.index_worker.finished_build.connect(self._on_index_built)
@@ -909,6 +980,59 @@ class MainWindow(QMainWindow):
         if not ok:
             QMessageBox.warning(self, "Could not open file", err)
 
+    def _on_enter_pressed(self):
+        focus = QApplication.focusWidget()
+        in_table = focus is not None and (
+            focus is self.table or self.table.isAncestorOf(focus))
+        if in_table:
+            self._open_selected_files()
+        else:
+            self._start_search()
+
+    def _open_selected_files(self):
+        """Open every selected file in its default application."""
+        for path in self._selected_paths():
+            if not path:
+                continue
+            ok, err = utils.open_path(path)
+            if not ok:
+                QMessageBox.warning(self, "Could not open file", err)
+                return
+
+    def _copy_files_selected(self):
+        self._files_to_clipboard(cut=False)
+
+    def _cut_files_selected(self):
+        self._files_to_clipboard(cut=True)
+
+    def _files_to_clipboard(self, cut):
+        """Put the selected files on the clipboard as real files (not
+        just text), so Ctrl+V in an Explorer folder copies/moves them.
+        Cut works the Explorer way: nothing is removed here - the move
+        happens when the files are pasted."""
+        paths = [p for p in self._selected_paths() if p and os.path.exists(p)]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(os.path.abspath(p)) for p in paths])
+        # Pasting into a text editor yields the paths.
+        mime.setText(os.linesep.join(paths))
+        if utils.IS_WINDOWS:
+            # Explorer reads "Preferred DropEffect" to decide between
+            # copy (1) and move (2).
+            mime.setData(
+                'application/x-qt-windows-mime;value="Preferred DropEffect"',
+                struct.pack("<I", 2 if cut else 1))
+        elif sys.platform != "darwin":
+            # GNOME/KDE file managers (dev machines).
+            lines = [bytes(u.toEncoded()).decode("ascii") for u in mime.urls()]
+            payload = ("cut\n" if cut else "copy\n") + "\n".join(lines)
+            mime.setData("x-special/gnome-copied-files", payload.encode("utf-8"))
+        QApplication.clipboard().setMimeData(mime)
+        self.status_label.setText(
+            "%s %d file(s) - paste them into a folder." %
+            ("Cut" if cut else "Copied", len(paths)))
+
     def _reveal_selected(self):
         path = self._selected_path()
         if not path:
@@ -991,6 +1115,9 @@ class MainWindow(QMainWindow):
             menu.addAction(tr.get("menu_open_folder", "Open containing folder"), self._reveal_selected)
             menu.addSeparator()
 
+        menu.addAction(tr.get("menu_copy_files", "Copy file(s)") + "\tCtrl+C", self._copy_files_selected)
+        menu.addAction(tr.get("menu_cut_files", "Cut file(s)") + "\tCtrl+X", self._cut_files_selected)
+        menu.addSeparator()
         menu.addAction(tr.get("menu_copy_path", "Copy full path"), self._copy_path_selected)
         menu.addAction(tr.get("menu_copy_name", "Copy file name"), self._copy_name_selected)
         if multi:
@@ -1132,6 +1259,16 @@ class MainWindow(QMainWindow):
         self.history_model.setStringList(history)
         self._refresh_search_history_items(history)
 
+    def _on_search_history_removed(self, text):
+        """One entry was deleted with its "X" in the Search drop-down -
+        drop it from the saved history and the completer too, so it
+        stays gone. The combo has already removed the entry itself."""
+        history = [item for item in self._load_history() if item != text]
+        self.settings.setValue("search_history", history)
+        self.history_model.setStringList(history)
+        self.status_label.setText(
+            "Removed \u201c%s\u201d from the search history." % text)
+
     def _refresh_search_history_items(self, history):
         current = self.search_edit.currentText()
         self.search_edit.blockSignals(True)
@@ -1185,9 +1322,9 @@ class MainWindow(QMainWindow):
 
         self.settings.setValue("location_history", [])
         self.settings.remove("last_location")
-        self._populate_locations()
-        if self.location_combo.count() > 0:
-            self.location_combo.setCurrentIndex(0)
+        self.settings.remove("last_locations")
+        self._populate_locations(keep_selection=False)
+        self.location_combo.set_row_checked(0, True)
 
         self.status_label.setText("History cleared.")
 
@@ -1230,8 +1367,7 @@ class MainWindow(QMainWindow):
 
         # Look in
         home = os.path.expanduser("~")
-        idx = self.location_combo.findText(home)
-        self.location_combo.setCurrentIndex(idx if idx != -1 else 0)
+        self.location_combo.set_selected_paths([home])
         self.subfolders_check.setChecked(True)
 
         # Filters
@@ -1270,7 +1406,7 @@ class MainWindow(QMainWindow):
             "<p>Built with Python and PyQt5. Live and indexed search, "
             "accent-insensitive and wildcard matching, a PDF/DJVU preview "
             "pane, and native Windows Explorer context menu integration.</p>"
-            "<p>&copy; %s</p>" % (APP_VERSION, time.strftime("%Y")))
+            "<p>%s &copy; Maher Berzig</p>" % (APP_VERSION, time.strftime("%Y")))
 
     def _load_settings(self):
         idx = self.language_combo.findData(tr.lang)
@@ -1279,11 +1415,22 @@ class MainWindow(QMainWindow):
             self.language_combo.setCurrentIndex(idx)
             self.language_combo.blockSignals(False)
 
-        last_location = self.settings.value("last_location", "")
-        if last_location:
-            if self.location_combo.findText(last_location) == -1:
-                self.location_combo.insertItem(0, last_location)
-            self.location_combo.setCurrentIndex(self.location_combo.findText(last_location))
+        # "last_locations" is the multi-folder list; "last_location" is
+        # the single path older versions saved - read either, so an
+        # existing install keeps its "Look in" folder after upgrading.
+        last_locations = self.settings.value("last_locations", [])
+        if isinstance(last_locations, str):
+            last_locations = [last_locations]
+        last_locations = [p for p in (last_locations or []) if p]
+        if not last_locations:
+            single = self.settings.value("last_location", "")
+            last_locations = [single] if single else []
+        if last_locations:
+            self.location_combo.set_selected_paths(last_locations)
+        if not self.location_combo.selected_paths():
+            # Nothing remembered yet - tick the first drive, which is
+            # what the old single-selection combo defaulted to.
+            self.location_combo.set_row_checked(0, True)
 
         preview_visible = self.settings.value("preview_visible", False, type=bool)
         self.preview_check.setChecked(preview_visible)
@@ -1316,7 +1463,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.settings.setValue("language", tr.lang)
-        self.settings.setValue("last_location", self.location_combo.currentText())
+        self.settings.setValue("last_locations", self.location_combo.selected_paths())
         if self.words_exact_check.isChecked():
             word_mode = "phrase"
         elif self.words_any_check.isChecked():

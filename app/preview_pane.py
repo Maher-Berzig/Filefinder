@@ -1,5 +1,6 @@
 """
-Left-side preview pane for the results table: shows PDF/DJVU pages.
+Left-side preview pane for the results table: shows PDF/DJVU pages and
+images.
 
 Two view modes:
   - "single"     one page at a time, with Prev/Next/page-number nav.
@@ -25,12 +26,16 @@ ignored instead of overwriting newer results or corrupting state.
 import html
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QSize, QRectF, QPointF
-from PyQt5.QtGui import QPixmap, QKeySequence, QIcon, QPainter, QPen, QColor, QPolygonF, QFontDatabase, QTransform
+from PyQt5.QtGui import (
+    QPixmap, QKeySequence, QIcon, QPainter, QPen, QColor, QPolygonF,
+    QFontDatabase, QTransform, QImageReader,
+)
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSpinBox, QSizePolicy, QToolButton, QButtonGroup, QShortcut, QTextEdit,
@@ -65,6 +70,14 @@ TEXT_PREVIEW_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 NAV_BTN_SIZE = QSize(30, 30)
 NAV_ICON_SIZE = QSize(18, 18)
 PAGE_GAP_PX = 28  # visible gap between pages in "Show pages continuously" mode
+
+# Kinds rendered as pages into the scroll area (as opposed to the
+# .docx/plain-text view): these are the ones the page navigation, zoom,
+# rotate, fit and continuous-scroll controls apply to. Images count -
+# a multi-frame image (animated GIF, multi-page TIFF, multi-size ICO)
+# exposes each frame as a "page", and a plain single-frame one is just
+# a one-page document.
+PAGED_KINDS = ("pdf", "djvu", "image")
 
 
 def _single_page_icon(size=18):
@@ -262,30 +275,60 @@ def _make_nav_button(icon=None, text=None, tooltip="", checkable=False):
     return btn
 
 
-def _default_djvu_tools_dir():
-    """Where to find ddjvu.exe/djvused.exe without the user having to
-    point at them manually - this is where Filefinder.bat's
-    --add-binary lines put them when building with PyInstaller."""
-    candidates = []
+_DJVU_TOOL_NAMES = ("ddjvu.exe", "ddjvu")
+
+
+def _djvu_dir_has_tools(folder):
+    return bool(folder) and any(
+        os.path.isfile(os.path.join(folder, name)) for name in _DJVU_TOOL_NAMES)
+
+
+def _djvu_search_dirs():
+    """Every folder worth checking for ddjvu.exe/djvused.exe, in
+    priority order: next to the program, the bundled/PyInstaller
+    folders (_MEIPASS and the "_internal" folder), and the conventional
+    resources/djvulibre folder - each also tried one level down, since
+    --add-data "resources;resources" puts the tools in
+    <bundle>/resources/djvulibre rather than at the bundle root."""
+    bases = []
     if getattr(sys, "frozen", False):
-        # PyInstaller sets _MEIPASS to the bundle's extraction root -
-        # for --onedir builds (what Filefinder.bat produces) that's the
-        # "_internal" folder next to the .exe, exactly where
-        # --add-binary "...;." puts things.
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            candidates.append(meipass)
-        candidates.append(os.path.dirname(sys.executable))
-    else:
-        # Running from source (e.g. "python main.py") - check next to
-        # this file, and the conventional resources/djvulibre folder.
-        here = os.path.dirname(os.path.abspath(__file__))
-        candidates.append(here)
-        candidates.append(os.path.join(os.path.dirname(here), "resources", "djvulibre"))
+            bases.append(meipass)
+        bases.append(exe_dir)
+        bases.append(os.path.join(exe_dir, "_internal"))
+    here = os.path.dirname(os.path.abspath(__file__))
+    bases.append(here)
+    bases.append(os.path.dirname(here))
+    try:
+        bases.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    except Exception:
+        pass
+    bases.append(os.getcwd())
 
-    for candidate in candidates:
-        if candidate and os.path.exists(os.path.join(candidate, "ddjvu.exe")):
-            return candidate
+    dirs = []
+    for base in bases:
+        for sub in ("", os.path.join("resources", "djvulibre"),
+                    "djvulibre", "resources"):
+            folder = os.path.normpath(os.path.join(base, sub))
+            if folder not in dirs:
+                dirs.append(folder)
+    return dirs
+
+
+def _default_djvu_tools_dir():
+    """Where to find ddjvu.exe/djvused.exe without the user having to
+    point at them manually. Checks the bundled/source locations from
+    _djvu_search_dirs(), then falls back to whatever is on the system
+    PATH. Returns None if nothing is found."""
+    for folder in _djvu_search_dirs():
+        if _djvu_dir_has_tools(folder):
+            return folder
+    for name in _DJVU_TOOL_NAMES:
+        found = shutil.which(name)
+        if found:
+            return os.path.dirname(os.path.abspath(found))
     return None
 
 
@@ -333,7 +376,10 @@ class _PdfPageWorker(QThread):
             self.pageReady.emit(
                 self.generation, self.page_index, QPixmap(), 0,
                 "PDF preview needs PyMuPDF. Install it with:\n"
-                "    pip install PyMuPDF")
+                "    pip install PyMuPDF\n\n"
+                "Running Python (make sure this is the one you installed\n"
+                "PyMuPDF into):\n"
+                "    %s" % sys.executable)
             return
         try:
             doc = fitz.open(self.path)
@@ -383,11 +429,14 @@ class _DjvuPageWorker(QThread):
         self.target_width_px = target_width_px
 
     def _tool(self, name):
-        if self.tools_dir:
-            candidate = os.path.join(self.tools_dir, name)
-            if os.path.exists(candidate):
-                return candidate
-        return name  # rely on PATH
+        folders = [self.tools_dir] if self.tools_dir else []
+        folders += [d for d in _djvu_search_dirs() if d != self.tools_dir]
+        for folder in folders:
+            for variant in (name, name[:-4] if name.endswith(".exe") else name):
+                candidate = os.path.join(folder, variant)
+                if os.path.isfile(candidate):
+                    return candidate
+        return shutil.which(name) or name  # last resort: PATH
 
     def run(self):
         try:
@@ -414,9 +463,135 @@ class _DjvuPageWorker(QThread):
                 self.generation, index, QPixmap(), page_count,
                 "DJVU preview needs the djvulibre tools (ddjvu.exe, "
                 "djvused.exe) - place them next to the .exe (or bundle "
-                "them via Filefinder.bat) or on the system PATH.")
+                "them via Filefinder.bat) or on the system PATH.\n\n"
+                "Looked in:\n" + "\n".join(_djvu_search_dirs()))
         except Exception as exc:
             self.pageReady.emit(self.generation, index, QPixmap(), page_count, str(exc))
+
+
+class _ImagePageWorker(QThread):
+    """Loads one frame of an image file through QImageReader.
+
+    QImageReader is Qt's own loader, so every format the installed image
+    plugins understand previews with no extra dependency - bmp, cur,
+    gif, icns, ico, jpeg, jpg, pbm, pgm, png, ppm, svg, svgz, tga, tif,
+    tiff, wbmp, webp, xbm, xpm on a stock PyQt5 (see
+    utils.image_extensions(), which asks the running Qt rather than
+    assuming that list).
+
+    Multi-frame files are handled as multi-page documents: imageCount()
+    becomes the page count, so the existing Prev/Next/page-number
+    navigation steps through an animated GIF's frames, a multi-page
+    TIFF's pages, or an .ico's individual sizes.
+    """
+
+    # generation, page(0-based), pixmap, page_count, error
+    pageReady = pyqtSignal(int, int, QPixmap, int, str)
+
+    # Resolution-independent formats: there's no "natural" pixel size
+    # worth preserving, so these are rasterized straight at the size we
+    # want to show them at.
+    VECTOR_FORMATS = ("svg", "svgz")
+
+    def __init__(self, generation, path, page_index, target_width_px):
+        super().__init__()
+        self.generation = generation
+        self.path = path
+        self.page_index = page_index
+        self.target_width_px = target_width_px
+
+    def _seek(self, reader, index):
+        """Move to frame *index*. Most plugins can jump straight there;
+        a few only walk forwards, hence the fallback."""
+        if index <= 0:
+            return
+        if reader.jumpToImage(index):
+            return
+        for _ in range(index):
+            if not reader.jumpToNextImage():
+                break
+
+    def _read(self, from_content):
+        """One decode attempt. Returns (image, page_count, error).
+
+        from_content=False lets Qt pick the plugin the way it normally
+        does (extension first) - which is the only thing that works for
+        a gzip-compressed .svgz, whose raw bytes no plugin recognises.
+        from_content=True is the retry for files whose extension lies.
+        """
+        reader = QImageReader(self.path)
+        if from_content:
+            reader.setDecideFormatFromContent(True)
+        # Honour the EXIF orientation tag, the way every other image
+        # viewer does - otherwise photos taken in portrait show up on
+        # their side.
+        reader.setAutoTransform(True)
+
+        page_count = max(reader.imageCount(), 1)
+        index = max(0, min(self.page_index, page_count - 1))
+        self._seek(reader, index)
+
+        natural = reader.size()
+        target_w = max(self.target_width_px, 100)
+        if self._is_vector(reader):
+            # No "natural" pixel size worth preserving - rasterize
+            # straight at the size we want, so it stays crisp instead
+            # of being scaled up from the plugin's default size.
+            reader.setScaledSize(
+                QSize(target_w, max(self._scaled_height(natural, target_w), 1)))
+        elif natural.isValid() and natural.width() > target_w:
+            # A big photo is scaled down *while decoding*, which is far
+            # cheaper in time and memory than loading it at full size
+            # and shrinking it afterwards. Images smaller than the
+            # target are read at their own size and never blown up
+            # here - _scale_for_display() shows those at 100%.
+            reader.setScaledSize(
+                QSize(target_w, max(self._scaled_height(natural, target_w), 1)))
+
+        image = reader.read()
+        error = "" if not image.isNull() else (
+            reader.errorString() or "Could not read this image file.")
+        return image, page_count, index, error
+
+    def run(self):
+        try:
+            image, page_count, index, error = self._read(from_content=False)
+            if image.isNull():
+                # Extension lied (or there isn't one) - ask the plugins
+                # to identify the file by its contents instead.
+                retry_image, retry_count, retry_index, retry_error = self._read(
+                    from_content=True)
+                if not retry_image.isNull():
+                    image, page_count, index, error = (
+                        retry_image, retry_count, retry_index, "")
+                elif retry_error:
+                    error = retry_error
+
+            if image.isNull():
+                self.pageReady.emit(
+                    self.generation, index, QPixmap(), page_count, error)
+                return
+
+            self.pageReady.emit(
+                self.generation, index, QPixmap.fromImage(image), page_count, "")
+        except Exception as exc:
+            self.pageReady.emit(
+                self.generation, self.page_index, QPixmap(), 0, str(exc))
+
+    def _is_vector(self, reader):
+        fmt = bytes(reader.format()).decode("ascii", "ignore").strip().lower()
+        if fmt in self.VECTOR_FORMATS:
+            return True
+        # An .svgz reports no usable format of its own on some builds -
+        # fall back to what the file is called.
+        return os.path.splitext(self.path)[1].lower().lstrip(".") in self.VECTOR_FORMATS
+
+    @staticmethod
+    def _scaled_height(natural_size, target_width):
+        if natural_size.isValid() and natural_size.width() > 0:
+            return int(round(target_width * natural_size.height()
+                             / float(natural_size.width())))
+        return target_width
 
 
 def _iter_docx_block_items(document):
@@ -602,7 +777,8 @@ class _PreviewScrollArea(QScrollArea):
 
 
 class PreviewPane(QWidget):
-    """Shows PDF/DJVU pages, single-page or continuous, with zoom."""
+    """Shows PDF/DJVU pages and images, single-page or continuous, with
+    zoom - plus .docx/plain-text content in a separate text view."""
 
     MIN_ZOOM = 0.25
     MAX_ZOOM = 5.0
@@ -611,7 +787,7 @@ class PreviewPane(QWidget):
         super().__init__(parent)
         self.settings = QSettings("FileFinder", "FileFinderApp")
         self.current_path = None
-        self.current_kind = None  # "pdf" | "djvu" | "docx" | "doc" | "text"
+        self.current_kind = None  # "pdf" | "djvu" | "image" | "docx" | "doc" | "text"
         self.page_index = 0
         self.page_count = 0
         self.zoom_factor = 1.0
@@ -791,7 +967,8 @@ class PreviewPane(QWidget):
 
     def _set_paged_controls_visible(self, visible):
         """Prev/Next/zoom/fit/Continuous/Single only make sense for
-        page-based content (PDF/DJVU) - hide the lot for .docx/text."""
+        page-based content (PDF/DJVU/images) - hide the lot for the
+        .docx/text view."""
         self._set_nav_visible(visible and self.view_mode == "single")
         for widget in (self.zoom_out_btn, self.zoom_in_btn,
                        self.rotate_left_btn, self.rotate_right_btn,
@@ -820,7 +997,11 @@ class PreviewPane(QWidget):
         location Filefinder.bat's --add-binary lines put ddjvu.exe/
         djvused.exe in, requiring no configuration at all."""
         explicit = self.settings.value("djvu_tools_dir", "") or None
-        return explicit or _default_djvu_tools_dir()
+        # A saved folder only wins while it still contains the tools -
+        # a stale/moved one used to silently break the preview.
+        if explicit and _djvu_dir_has_tools(str(explicit)):
+            return str(explicit)
+        return _default_djvu_tools_dir()
 
     def _bump_generation(self):
         self._generation += 1
@@ -878,10 +1059,12 @@ class PreviewPane(QWidget):
             self.show_message(tr.get(key, default), message_key=key)
 
     def show_file(self, path):
-        """Load and preview *path*: PDF/DJVU render as pages, .docx
-        renders formatted (needs python-docx), .doc (legacy binary
-        format) shows an explanatory message, and everything else shows
-        as plain text if it looks like text and isn't too large."""
+        """Load and preview *path*: PDF/DJVU render as pages, images
+        render through QImageReader (each frame of a multi-frame image
+        being one "page"), .docx renders formatted (needs python-docx),
+        .doc (legacy binary format) shows an explanatory message, and
+        everything else shows as plain text if it looks like text and
+        isn't too large."""
         if not path or not os.path.exists(path):
             self.show_message(
                 tr.get("preview_file_not_found", "File not found."),
@@ -899,13 +1082,15 @@ class PreviewPane(QWidget):
             kind = "docx"
         elif ext == ".doc":
             kind = "doc"
+        elif ext in utils.image_extensions():
+            kind = "image"
         else:
             kind = "text"
 
         self.current_path = path
         self.current_kind = kind
 
-        if kind in ("pdf", "djvu"):
+        if kind in PAGED_KINDS:
             self._set_content_widget("paged")
             self._set_paged_controls_visible(True)
             self.page_index = 0
@@ -993,6 +1178,9 @@ class PreviewPane(QWidget):
         target_width_px = self._target_render_width()
         if self.current_kind == "pdf":
             worker = _PdfPageWorker(generation, self.current_path, page_index, target_width_px)
+        elif self.current_kind == "image":
+            worker = _ImagePageWorker(
+                generation, self.current_path, page_index, target_width_px)
         else:
             tools_dir = self._resolve_djvu_tools_dir()
             worker = _DjvuPageWorker(
@@ -1043,6 +1231,16 @@ class PreviewPane(QWidget):
             self._last_aspect_ratio = pixmap.height() / pixmap.width()
         screen = self.screen()
         dpr = screen.devicePixelRatio() if screen else 1.0
+        if self.current_kind == "image":
+            # Unlike a PDF/DJVU page - which is re-rendered at whatever
+            # size we ask for - an image has a real pixel size of its
+            # own, so it is never blown up to fill the pane: shown at
+            # 100% (times the zoom factor), and only shrunk when it is
+            # wider than the pane. Otherwise a 32x32 icon would arrive
+            # as a pane-wide blur.
+            natural_logical = max(pixmap.width() / (dpr or 1.0), 1.0)
+            target_logical_width = min(
+                target_logical_width, natural_logical * self.zoom_factor)
         target_device_width = max(int(target_logical_width * dpr), 1)
         # We deliberately over-rendered (see _target_render_width), so
         # this is a precise downscale, never an upscale - that's what
@@ -1330,7 +1528,7 @@ class PreviewPane(QWidget):
         self._set_zoom(target_width / vw)
 
     def _set_zoom(self, factor):
-        if self.current_kind not in ("pdf", "djvu"):
+        if self.current_kind not in PAGED_KINDS:
             return  # zoom is meaningless for the .docx/text view
         factor = max(self.MIN_ZOOM, min(factor, self.MAX_ZOOM))
         if abs(factor - self.zoom_factor) < 1e-3:
@@ -1354,11 +1552,11 @@ class PreviewPane(QWidget):
         super().resizeEvent(event)
         # Debounce: only actually re-render once the user stops
         # dragging the splitter/resizing the window.
-        if self.current_path and self.current_kind in ("pdf", "djvu"):
+        if self.current_path and self.current_kind in PAGED_KINDS:
             self._resize_timer.start(300)
 
     def _refresh_for_new_render_settings(self):
-        if not self.current_path or self.current_kind not in ("pdf", "djvu"):
+        if not self.current_path or self.current_kind not in PAGED_KINDS:
             return
         self._bump_generation()
         if self.view_mode == "continuous":
