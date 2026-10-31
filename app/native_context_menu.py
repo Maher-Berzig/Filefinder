@@ -22,6 +22,7 @@ This uses the classic IShellFolder / IContextMenu COM approach:
        whatever the user picked - exactly like Explorer would.
 """
 import os
+import subprocess
 
 from PyQt5.QtGui import QIcon, QImage, QPixmap
 
@@ -37,6 +38,8 @@ if IS_WINDOWS:
     try:
         import ctypes
         from ctypes import wintypes
+        import pythoncom
+        import win32api
         import win32con
         import win32gui
         import win32gui_struct
@@ -228,11 +231,18 @@ def get_context_menu(hwnd, paths):
         return None, None, str(exc)
 
 
-def read_menu_items(hmenu):
+def read_menu_items(hmenu, context_menu=None):
     """Recursively turn a native HMENU into a plain list of dicts:
     {"text": str, "separator": bool, "disabled": bool,
      "id": int or None, "submenu": [items] or None, "icon": QIcon or None}
     Safe to call on any HMENU; never raises (returns [] on failure).
+
+    This deliberately only *reads* the menu. It does not send
+    WM_INITMENUPOPUP or query command strings on the shell handlers:
+    some third-party handlers (PDF viewers/editors in particular) crash
+    the whole process when poked that way. "Send to" is therefore built
+    by File Finder itself (see list_send_to_targets), not by the shell.
+    ``context_menu`` is accepted only for call compatibility.
     """
     if not hmenu:
         return []
@@ -274,17 +284,6 @@ def read_menu_items(hmenu):
 
 
 # def invoke_command(context_menu, hwnd, cmd_id):
-    # """Run the command with the given absolute menu id (as read from
-    # read_menu_items()'s "id" field)."""
-    # try:
-        # invoke_info = (hwnd, 0, cmd_id - IDCMD_FIRST, None, None, 0, 0, 0)
-        # context_menu.InvokeCommand(invoke_info)
-        # return True, ""
-    # except Exception as exc:
-        # return False, str(exc)
-
-
-def invoke_command(context_menu, hwnd, cmd_id):
     invoke_info = (0, hwnd, cmd_id - IDCMD_FIRST, None, None, 0, 0, 0)
     context_menu.InvokeCommand(invoke_info)
     return True, ""
@@ -295,3 +294,207 @@ def destroy_menu(hmenu):
             win32gui.DestroyMenu(hmenu)
         except Exception:
             pass
+
+
+# ----------------------------------------------------------------------
+# Built-in "Send to" (fallback when the shell hands back an empty submenu)
+# ----------------------------------------------------------------------
+_DRIVE_REMOVABLE, _DRIVE_FIXED, _DRIVE_REMOTE, _DRIVE_CDROM = 2, 3, 4, 5
+
+
+def _sendto_folder():
+    try:
+        folder = shell.SHGetSpecialFolderPath(0, shellcon.CSIDL_SENDTO)
+        if folder and os.path.isdir(folder):
+            return folder
+    except Exception:
+        pass
+    folder = os.path.join(os.environ.get("APPDATA", ""), "Microsoft",
+                          "Windows", "SendTo")
+    return folder if os.path.isdir(folder) else ""
+
+
+def _drive_targets():
+    """Connected drives a file can be sent to: removable drives (USB
+    sticks, SD cards) plus every other ready non-system disk - many USB
+    sticks and all external USB hard disks are reported by Windows as
+    ordinary *fixed* disks, so a "removable only" filter misses them.
+    Found through the Win32 drive list and, as a second opinion, Qt's
+    mounted-volume list."""
+    found = {}   # "E:" -> label
+
+    system_drive = os.path.splitdrive(
+        os.environ.get("SystemRoot", os.environ.get("SYSTEMDRIVE", "C:")))[0].upper()
+
+    try:
+        for root in win32api.GetLogicalDriveStrings().split("\0"):
+            if not root:
+                continue
+            drive = root[:2].upper()
+            if drive == system_drive:
+                continue
+            try:
+                dtype = win32api.GetDriveType(root)
+            except Exception:
+                continue
+            if dtype not in (_DRIVE_REMOVABLE, _DRIVE_FIXED):
+                continue
+            kind_name = "Removable Disk" if dtype == _DRIVE_REMOVABLE else "Local Disk"
+            try:
+                name = win32api.GetVolumeInformation(root)[0] or kind_name
+            except Exception:
+                # Usually "not ready" (empty card reader). Skip those.
+                if not os.path.isdir(root):
+                    continue
+                name = kind_name
+            found[drive] = name
+    except Exception:
+        pass
+
+    try:
+        from PyQt5.QtCore import QStorageInfo
+        for vol in QStorageInfo.mountedVolumes():
+            root = vol.rootPath()
+            drive = os.path.splitdrive(root)[0].upper()
+            if (not drive or drive == system_drive or drive in found
+                    or not vol.isValid() or not vol.isReady()):
+                continue
+            found[drive] = vol.displayName() or vol.name() or "Disk"
+    except Exception:
+        pass
+
+    return [{
+        "label": "%s (%s)" % (found[d], d),
+        "kind": "drive",
+        "path": d + "\\",
+    } for d in sorted(found)]
+
+
+def list_send_to_targets():
+    """Targets for the built-in Send to menu: everything in the user's
+    SendTo folder (shortcuts, Compressed folder, Mail recipient, ...)
+    followed by the currently connected drives. Each target is a dict
+    {"label", "kind": "item" | "drive" | "separator", "path"}."""
+    if not is_available():
+        return []
+    targets = []
+    folder = _sendto_folder()
+    if folder:
+        try:
+            names = sorted(os.listdir(folder), key=lambda n: n.lower())
+        except OSError:
+            names = []
+        for name in names:
+            if name.startswith(".") or name.lower() == "desktop.ini":
+                continue
+            full = os.path.join(folder, name)
+            label = name if os.path.isdir(full) else os.path.splitext(name)[0]
+            targets.append({"label": label, "kind": "item", "path": full})
+    drives = _drive_targets()
+    if targets and drives:
+        targets.append({"label": "", "kind": "separator", "path": ""})
+    targets.extend(drives)
+    return targets
+
+
+def _copy_with_shell(hwnd, paths, dest_dir):
+    """Copy *paths* into *dest_dir* using the shell's own file
+    operation, so you get the normal Windows progress dialog and its
+    overwrite / error prompts."""
+    src = "\0".join(os.path.normpath(p) for p in paths)
+    dest = os.path.normpath(dest_dir)
+    if not dest.endswith(os.sep):
+        dest += os.sep
+    try:
+        rc, aborted = shell.SHFileOperation(
+            (hwnd, shellcon.FO_COPY, src, dest, 0, None, None))
+    except Exception as exc:
+        return False, str(exc)
+    if aborted:
+        return True, ""  # the user cancelled in the dialog
+    if rc != 0:
+        return False, "Copying failed (error code %d)." % rc
+    return True, ""
+
+
+def _resolve_shortcut(lnk_path):
+    """(target, arguments, working_dir) of a .lnk file, or None."""
+    try:
+        import win32com.client
+        link = win32com.client.Dispatch("WScript.Shell").CreateShortCut(lnk_path)
+        target = link.TargetPath
+        if not target:
+            return None
+        return target, link.Arguments or "", link.WorkingDirectory or ""
+    except Exception:
+        return None
+
+
+def _drop_on_item(hwnd, item_path, paths):
+    """Drop *paths* on a SendTo-folder item through its shell
+    IDropTarget (what Explorer does for Compressed folder, Mail
+    recipient, Desktop (create shortcut), ...)."""
+    try:
+        desktop = shell.SHGetDesktopFolder()
+
+        def bind(path):
+            folder = os.path.dirname(path)
+            fpidl = _first_value(desktop.ParseDisplayName(hwnd, None, folder))
+            fobj = _get_interface(
+                desktop.BindToObject(fpidl, None, shell.IID_IShellFolder),
+                "ParseDisplayName")
+            rel = [_first_value(fobj.ParseDisplayName(hwnd, None, os.path.basename(path)))]
+            return fobj, rel
+
+        src_folder = os.path.dirname(os.path.normpath(paths[0]))
+        sfpidl = _first_value(desktop.ParseDisplayName(hwnd, None, src_folder))
+        sfobj = _get_interface(
+            desktop.BindToObject(sfpidl, None, shell.IID_IShellFolder),
+            "ParseDisplayName")
+        rels = [_first_value(sfobj.ParseDisplayName(
+            hwnd, None, os.path.basename(os.path.normpath(p)))) for p in paths]
+        data_obj = sfobj.GetUIObjectOf(hwnd, rels, pythoncom.IID_IDataObject, 0)
+
+        target_folder, target_rel = bind(os.path.normpath(item_path))
+        drop_target = target_folder.GetUIObjectOf(
+            hwnd, target_rel, pythoncom.IID_IDropTarget, 0)
+        copy_effect, mk_lbutton = 1, 1
+        effect = drop_target.DragEnter(data_obj, mk_lbutton, (0, 0), copy_effect)
+        drop_target.Drop(data_obj, mk_lbutton, (0, 0), effect or copy_effect)
+        return True, ""
+    except Exception as exc:
+        return False, "This Send to item could not be used: %s" % exc
+
+
+def send_to_target(hwnd, target, paths):
+    """Send *paths* to a target from list_send_to_targets().
+    Returns (ok, error_message)."""
+    if not is_available():
+        return False, unavailable_reason()
+    paths = [os.path.normpath(p) for p in paths if p]
+    if not paths:
+        return False, "Nothing selected."
+    try:
+        if target["kind"] == "drive":
+            return _copy_with_shell(hwnd, paths, target["path"])
+
+        item = target["path"]
+        if os.path.isdir(item):
+            return _copy_with_shell(hwnd, paths, item)
+
+        if item.lower().endswith(".lnk"):
+            resolved = _resolve_shortcut(item)
+            if resolved is not None:
+                dest, args, workdir = resolved
+                if os.path.isdir(dest):
+                    return _copy_with_shell(hwnd, paths, dest)
+                if os.path.isfile(dest):
+                    cmdline = '"%s"' % dest
+                    if args:
+                        cmdline += " " + args
+                    cmdline += " " + " ".join('"%s"' % p for p in paths)
+                    subprocess.Popen(cmdline, cwd=workdir or None)
+                    return True, ""
+        return _drop_on_item(hwnd, item, paths)
+    except Exception as exc:
+        return False, str(exc)

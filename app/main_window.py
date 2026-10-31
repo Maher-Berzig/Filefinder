@@ -35,6 +35,26 @@ COLUMN_KEYS = ["col_name", "col_folder", "col_size", "col_type", "col_date_modif
 COLUMNS_EN = ["Name", "Folder", "Size", "Type", "Date modified"]
 
 
+# Caption of the shell's "Send to" entry in common Windows display
+# languages (matched as a prefix, case-insensitive). The shell's own
+# submenu is never used - it is empty unless the shell handlers are
+# poked, which crashes some PDF shell extensions - so File Finder shows
+# its own "Send to" (SendTo folder + connected drives) in its place.
+_SEND_TO_NAMES = (
+    "send to", "envoyer vers", "envoyer à", "senden an", "enviar a",
+    "enviar para", "invia a", "verzenden naar", "skicka till", "send til",
+    "lähetä", "wyślij", "odeslat", "odoslať", "küldés", "trimite",
+    "отправить", "надіслати", "gönder", "στείλ", "שלח", "إرسال إلى",
+    "إرسال", "ارسال", "送る", "发送到", "發送到", "傳送到", "보내기",
+    "ส่งไปยัง", "gửi", "kirim ke", "hantar ke",
+)
+
+
+def _is_send_to_caption(text):
+    t = (text or "").replace("&", "").strip().lower().rstrip(".…\u2026 ")
+    return any(t.startswith(n) for n in _SEND_TO_NAMES)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_folder=None):
         super().__init__()
@@ -1136,7 +1156,7 @@ class MainWindow(QMainWindow):
             context_menu_obj, hmenu, err = native_context_menu.get_context_menu(
                 hwnd, selected_paths)
             if context_menu_obj is not None and hmenu is not None:
-                items = native_context_menu.read_menu_items(hmenu)
+                items = native_context_menu.read_menu_items(hmenu, context_menu_obj)
                 if items:
                     menu.addSeparator()
 
@@ -1147,7 +1167,14 @@ class MainWindow(QMainWindow):
                             return
                         self._refresh_rows_after_native_action(_paths)
                         
-                    self._populate_native_menu(menu, items, invoke)
+                    self._send_to_added = False
+                    self._populate_native_menu(
+                        menu, items, invoke, hwnd, list(selected_paths))
+                    if not self._send_to_added:
+                        # Unknown language / shell didn't offer one.
+                        self._add_send_to_fallback(
+                            menu, {"text": tr.get("menu_send_to", "Send to")},
+                            hwnd, list(selected_paths))
             elif err:
                 menu.addSeparator()
                 note = menu.addAction("Windows context menu unavailable (%s)" % err)
@@ -1172,7 +1199,8 @@ class MainWindow(QMainWindow):
             if item and item.data(Qt.UserRole) in missing:
                 self.table.removeRow(row)
 
-    def _populate_native_menu(self, qmenu, items, invoke_callback):
+    def _populate_native_menu(self, qmenu, items, invoke_callback,
+                              hwnd=None, paths=None):
         """Recursively add the shell menu's items/submenus as QActions,
         carrying over each item's icon when the shell handed us one."""
         for entry in items:
@@ -1182,10 +1210,19 @@ class MainWindow(QMainWindow):
             if entry["submenu"] is not None:
                 if not entry["text"]:
                     continue
+                if _is_send_to_caption(entry["text"]):
+                    # Our own "Send to": SendTo folder + connected drives.
+                    self._send_to_added = True
+                    self._add_send_to_fallback(qmenu, entry, hwnd, paths or [])
+                    continue
+                if not any(e.get("text") and not e.get("separator")
+                           for e in entry["submenu"]):
+                    continue  # empty placeholder submenu - nothing to show
                 sub = qmenu.addMenu(entry["text"])
                 if entry.get("icon") is not None:
                     sub.menuAction().setIcon(entry["icon"])
-                self._populate_native_menu(sub, entry["submenu"], invoke_callback)
+                self._populate_native_menu(
+                    sub, entry["submenu"], invoke_callback, hwnd, paths)
                 continue
             if not entry["text"]:
                 continue
@@ -1196,6 +1233,35 @@ class MainWindow(QMainWindow):
             cmd_id = entry["id"]
             action.triggered.connect(
                 lambda checked=False, cid=cmd_id: invoke_callback(cid))
+
+    def _add_send_to_fallback(self, qmenu, entry, hwnd, paths):
+        sub = qmenu.addMenu(entry["text"])
+        if entry.get("icon") is not None:
+            sub.menuAction().setIcon(entry["icon"])
+        targets = native_context_menu.list_send_to_targets()
+        if not targets:
+            empty = sub.addAction("(Empty)")
+            empty.setEnabled(False)
+            return
+        for target in targets:
+            if target["kind"] == "separator":
+                sub.addSeparator()
+                continue
+            action = sub.addAction(target["label"])
+            icon = self.icon_provider.icon(QFileInfo(target["path"]))
+            if not icon.isNull():
+                action.setIcon(icon)
+            action.triggered.connect(
+                lambda checked=False, t=target: self._send_to(t, hwnd, paths))
+
+    def _send_to(self, target, hwnd, paths):
+        ok, err = native_context_menu.send_to_target(hwnd, target, paths)
+        if not ok:
+            QMessageBox.warning(self, "Send to", err or "Send to failed.")
+            return
+        self.status_label.setText(
+            "Sent %d file(s) to %s." % (len(paths), target["label"]))
+        self._refresh_rows_after_native_action(paths)
 
     # ------------------------------------------------------------------
     # System tray
@@ -1406,7 +1472,7 @@ class MainWindow(QMainWindow):
             "<p>Built with Python and PyQt5. Live and indexed search, "
             "accent-insensitive and wildcard matching, a PDF/DJVU preview "
             "pane, and native Windows Explorer context menu integration.</p>"
-            "<p>%s &copy; Maher Berzig</p>" % (APP_VERSION, time.strftime("%Y")))
+            "<p>&copy; %s</p>" % (APP_VERSION, time.strftime("%Y")))
 
     def _load_settings(self):
         idx = self.language_combo.findData(tr.lang)
