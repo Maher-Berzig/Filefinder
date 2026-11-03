@@ -32,6 +32,7 @@ cd /d "%~dp0"
 pyinstaller --clean --noconfirm --windowed ^
     --hidden-import fitz ^
     --hidden-import pymupdf ^
+    --collect-all pymupdf ^
     --add-data "resources;resources" ^
     --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libdjvulibre.dll;." ^
     --add-binary "C:\PyLatexProj\Filefinder\resources\djvulibre\libdjvulibre-21.dll;." ^
