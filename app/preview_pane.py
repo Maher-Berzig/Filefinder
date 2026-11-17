@@ -1044,6 +1044,24 @@ class PreviewPane(QWidget):
             tr.get("preview_select_file", "Select a file to preview it here."),
             message_key="preview_select_file")
 
+    def apply_theme(self, dark):
+        """Re-colour the hand-drawn header icons and the continuous-view
+        workspace for dark/light mode (called by MainWindow)."""
+        utils.set_dark(dark)
+        if not hasattr(self, "_orig_icons"):
+            self._orig_icons = {}
+            for name in ("zoom_out_btn", "zoom_in_btn", "rotate_left_btn",
+                         "rotate_right_btn", "fit_width_btn", "fit_window_btn",
+                         "continuous_btn", "single_btn"):
+                self._orig_icons[name] = getattr(self, name).icon()
+        for name, icon in self._orig_icons.items():
+            getattr(self, name).setIcon(utils.invert_icon(icon) if dark else icon)
+        self.prev_btn.setIcon(_triangle_icon("left"))
+        self.next_btn.setIcon(_triangle_icon("right"))
+        container = getattr(self, "_continuous_container", None)
+        if container is not None:
+            container.setStyleSheet("background-color: %s;" % utils.workspace_color())
+
     def retranslate_ui(self):
         """Refreshes the "Preview" header and, if a static placeholder/
         error message is currently showing (not real file content), its
@@ -1332,7 +1350,7 @@ class PreviewPane(QWidget):
             # pages unmistakable, instead of relying only on QVBoxLayout's
             # invisible spacing - which is easy to miss against a white
             # scroll background even when it IS being applied.
-            container.setStyleSheet("background-color: #c8c8c8;")
+            container.setStyleSheet("background-color: %s;" % utils.workspace_color())
             vbox = QVBoxLayout(container)
             vbox.setSpacing(0)  # real spacer widgets below do the work instead
             vbox.setContentsMargins(0, PAGE_GAP_PX, 0, PAGE_GAP_PX)

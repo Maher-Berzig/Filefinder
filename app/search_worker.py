@@ -40,6 +40,148 @@ def fold_accents(text):
     return "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
 
+_AND_WORDS = {"AND", "+", "&", "&&"}
+_OR_WORDS = {"OR", "|", "||"}
+_NOT_WORDS = {"NOT", "!"}
+
+
+def tokenize_query(text):
+    """Split a search query into tokens for the Boolean expression
+    parser. Each token is (kind, value, is_path, is_quoted) where kind
+    is "TERM", "AND", "OR", "NOT", "(" or ")".
+
+    Operators: AND / OR / NOT (upper-case, so ordinary words like "and"
+    stay words), or the symbols + (AND), | (OR), ! and a leading - (NOT).
+    "quoted text" is an exact phrase. A term starting with / or \\ is a
+    *path term*: it is matched against the whole file path, not only the
+    file name (e.g. \\books, or \\docs\\2024).
+    """
+    tokens = []
+    i, n = 0, len(text)
+
+    def add_term(word, quoted=False):
+        is_path = (not quoted) and word[:1] in ("/", "\\")
+        if is_path:
+            word = word[1:].replace("/", os.sep).replace("\\", os.sep)
+        tokens.append(("TERM", word, is_path, quoted))
+
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == '"':
+            j = text.find('"', i + 1)
+            if j == -1:
+                j = n
+            add_term(text[i + 1:j], quoted=True)
+            i = j + 1
+            continue
+        if c in "()":
+            tokens.append((c, c, False, False))
+            i += 1
+            continue
+        j = i
+        while j < n and not text[j].isspace() and text[j] not in '"()':
+            j += 1
+        word = text[i:j]
+        i = j
+        if word in _AND_WORDS:
+            tokens.append(("AND", word, False, False))
+        elif word in _OR_WORDS:
+            tokens.append(("OR", word, False, False))
+        elif word in _NOT_WORDS:
+            tokens.append(("NOT", word, False, False))
+        elif len(word) > 1 and word[0] in "-!":
+            tokens.append(("NOT", word[0], False, False))
+            add_term(word[1:])
+        elif len(word) > 1 and word[0] == "+":
+            add_term(word[1:])
+        else:
+            add_term(word)
+    return tokens
+
+
+def query_needs_expression(tokens):
+    """True when the query uses any Boolean operator, quoted phrase or
+    path term - i.e. when the plain word-list matching isn't enough."""
+    for kind, _value, is_path, quoted in tokens:
+        if kind in ("AND", "OR", "NOT") or is_path or quoted:
+            return True
+    return False
+
+
+class _ExpressionParser(object):
+    """Recursive-descent parser: OR (lowest) < AND < NOT (highest),
+    parentheses group. Two terms side by side are joined with AND, or
+    with OR when the Filters box is set to "Any word"."""
+
+    def __init__(self, tokens, any_mode, leaf):
+        self.tokens = tokens
+        self.pos = 0
+        self.any_mode = any_mode
+        self.leaf = leaf
+
+    def _peek(self):
+        return self.tokens[self.pos][0] if self.pos < len(self.tokens) else None
+
+    def _starts_operand(self):
+        return self._peek() in ("TERM", "NOT", "(")
+
+    def parse(self):
+        if not self.tokens:
+            return lambda subject: True
+        node = self._or_expr()
+        if self.pos < len(self.tokens):
+            raise ValueError("Invalid search expression: unexpected \u201c%s\u201d" %
+                             self.tokens[self.pos][1])
+        return node
+
+    def _or_expr(self):
+        left = self._and_expr()
+        while True:
+            kind = self._peek()
+            if kind == "OR":
+                self.pos += 1
+            elif not (self.any_mode and self._starts_operand()):
+                break
+            right = self._and_expr()
+            left = (lambda a, b: lambda s: a(s) or b(s))(left, right)
+        return left
+
+    def _and_expr(self):
+        left = self._unary()
+        while True:
+            kind = self._peek()
+            if kind == "AND":
+                self.pos += 1
+            elif not (not self.any_mode and self._starts_operand()):
+                break
+            right = self._unary()
+            left = (lambda a, b: lambda s: a(s) and b(s))(left, right)
+        return left
+
+    def _unary(self):
+        kind = self._peek()
+        if kind == "NOT":
+            self.pos += 1
+            inner = self._unary()
+            return lambda s: not inner(s)
+        if kind == "(":
+            self.pos += 1
+            node = self._or_expr()
+            if self._peek() != ")":
+                raise ValueError("Invalid search expression: missing \u201c)\u201d")
+            self.pos += 1
+            return node
+        if kind == "TERM":
+            _k, value, _p, quoted = self.tokens[self.pos]
+            self.pos += 1
+            return self.leaf(value, quoted)
+        raise ValueError("Invalid search expression: a search term is missing "
+                         "after an operator")
+
+
 class SearchWorker(QThread):
     resultsReady = pyqtSignal(list)          # list[dict]
     progress = pyqtSignal(int, str)          # scanned count, current path
@@ -66,6 +208,19 @@ class SearchWorker(QThread):
         word_mode = self.params.get("word_mode", "all")  # all | phrase | any
         exclude_text = (self.params.get("exclude_text") or "").strip()
         mode = self.params.get("mode", "contains")  # contains | wildcard | regex
+        # Boolean / path expression (AND, OR, NOT, +, |, -, quotes,
+        # parentheses, and "/folder" or "\\folder" path terms). Only
+        # used when the query actually contains such syntax; plain
+        # queries keep the original matching below. If any path term is
+        # present, every term is matched against the full path (which
+        # contains the file name too), so term order doesn't matter.
+        expr_tokens = None
+        path_mode = False
+        if mode != "regex":
+            toks = tokenize_query(pattern)
+            if query_needs_expression(toks):
+                expr_tokens = toks
+                path_mode = any(t[0] == "TERM" and t[2] for t in toks)
 
         flags = 0 if case_sensitive else re.IGNORECASE
 
@@ -104,12 +259,45 @@ class SearchWorker(QThread):
             exclude_fn = lambda name: compiled_exclude.search(fold(name)) is not None
 
         def combine(base):
-            if exclude_fn is None:
-                return base
-            return lambda name: base(name) and not exclude_fn(name)
+            # The returned matcher takes (name, dirpath). In path mode
+            # the main pattern is tested against the full path; the
+            # "No words" exclusion always looks at the file name only.
+            def run(name, dirpath=None):
+                if path_mode and dirpath is not None:
+                    subject = os.path.normpath(os.path.join(dirpath, name))
+                else:
+                    subject = name
+                if not base(subject):
+                    return False
+                return not (exclude_fn is not None and exclude_fn(name))
+            return run
 
         if not pattern:
             return combine(lambda name: True)
+
+        if expr_tokens is not None:
+            def leaf(value, quoted):
+                value = value.strip()
+                if not value:
+                    return lambda subject: True
+                try:
+                    if not quoted and ("*" in value or "?" in value):
+                        wp = value
+                        if not wp.startswith("*"):
+                            wp = "*" + wp
+                        if not wp.endswith("*"):
+                            wp = wp + "*"
+                        rx = re.compile(fnmatch.translate(fold(wp)), flags)
+                        return lambda subject: rx.match(subject) is not None
+                    rx = re.compile(word_pattern(value), flags)
+                except re.error as exc:
+                    raise ValueError("Invalid search text: %s" % exc)
+                return lambda subject: rx.search(subject) is not None
+
+            tree = _ExpressionParser(
+                expr_tokens, word_mode == "any", leaf).parse()
+            # Accent-fold the subject once, then test every term on it.
+            return combine(lambda subject: tree(fold(subject)))
 
         # Typing "*" or "?" means "wildcard search" regardless of which
         # mode is selected in the dropdown - e.g. "*iric" should just
@@ -270,7 +458,7 @@ class SearchWorker(QThread):
                     if self._stop:
                         break
                     scanned += 1
-                    if matcher(fname):
+                    if matcher(fname, dirpath):
                         full = os.path.join(dirpath, fname)
                         try:
                             st = os.stat(full)
@@ -296,6 +484,8 @@ class SearchWorker(QThread):
         mode = p.get("mode", "contains")
         case_sensitive = p.get("match_case", False)
         ignore_accents = not p.get("match_accents", False)
+        toks = tokenize_query(pattern) if mode != "regex" else []
+        uses_expression = query_needs_expression(toks)
         has_wildcard = "*" in pattern or "?" in pattern
 
         index = IndexManager()
@@ -308,7 +498,10 @@ class SearchWorker(QThread):
         # skip it and let the Python matcher see every indexed row
         # instead.
         name_query = ""
-        if (mode == "contains" and not case_sensitive and not ignore_accents
+        # Boolean / path expressions can't be narrowed by one name
+        # substring (a term may only appear in the folder part, or be
+        # negated), so they scan every row.
+        if (not uses_expression and mode == "contains" and not case_sensitive and not ignore_accents
                 and not p.get("whole_words", False)
                 and not has_wildcard and pattern
                 and len(pattern.split()) <= 1):
@@ -322,7 +515,7 @@ class SearchWorker(QThread):
         for path, name, dirpath, ext, size, mtime in rows:
             if self._stop:
                 break
-            if matcher(name) and self._passes_filters(name, size, mtime):
+            if matcher(name, dirpath) and self._passes_filters(name, size, mtime):
                 matched += 1
                 batch.append(self._make_record(path, name, dirpath, size, mtime))
             now = time.time()

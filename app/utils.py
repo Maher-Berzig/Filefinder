@@ -14,6 +14,33 @@ import sys
 IS_WINDOWS = platform.system() == "Windows"
 
 
+# Dark-mode switch shared by the hand-drawn icons and the preview pane's
+# hard-coded colours (set by MainWindow when the theme is toggled).
+DARK = False
+
+
+def set_dark(flag):
+    global DARK
+    DARK = bool(flag)
+
+
+def workspace_color():
+    """Background behind the pages in the preview's continuous view."""
+    return "#3a3a3a" if DARK else "#c8c8c8"
+
+
+def invert_icon(icon):
+    """Return *icon* with its colours inverted (alpha kept), so the
+    dark-grey hand-drawn glyphs become light on a dark button."""
+    from PyQt5.QtGui import QImage, QPixmap, QIcon
+    sizes = icon.availableSizes()
+    if not sizes:
+        return icon
+    img = icon.pixmap(sizes[0]).toImage().convertToFormat(QImage.Format_ARGB32)
+    img.invertPixels(QImage.InvertRgb)
+    return QIcon(QPixmap.fromImage(img))
+
+
 def triangle_icon(direction, size=18, color=None):
     """A simple solid triangle pointing left/right/up/down, drawn with
     QPainter so it's crisp at any size without needing an icon asset.
@@ -27,7 +54,7 @@ def triangle_icon(direction, size=18, color=None):
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(Qt.NoPen)
-    p.setBrush(color or QColor(90, 90, 90))
+    p.setBrush(color or (QColor(190, 190, 190) if DARK else QColor(90, 90, 90)))
     m = size * 0.24
     if direction == "left":
         points = [QPointF(size - m, m), QPointF(size - m, size - m), QPointF(m, size / 2.0)]
@@ -120,16 +147,52 @@ def is_previewable(path):
     return bool(path) and os.path.isfile(path)
 
 
+# Every image format a stock PyQt5 can decode through QImageReader.
+# Used as-is for the "Images" file-type filter, and as the floor for
+# image_extensions() below (which also asks the running Qt what its
+# installed image plugins actually support).
+IMAGE_EXTENSIONS_FALLBACK = {
+    ".bmp", ".cur", ".gif", ".icns", ".ico", ".jpeg", ".jpg", ".pbm",
+    ".pgm", ".png", ".ppm", ".svg", ".svgz", ".tga", ".tif", ".tiff",
+    ".wbmp", ".webp", ".xbm", ".xpm",
+}
+
+_image_extensions_cache = None
+
+
+def image_extensions():
+    """Extensions the preview pane can display as images.
+
+    Asked of QImageReader at runtime rather than hard-coded, so the
+    preview automatically covers whatever image format plugins are
+    actually installed alongside Qt (a frozen build that ships fewer
+    plugins, or a Qt with extra ones, both work out on their own).
+    IMAGE_EXTENSIONS_FALLBACK is unioned in so the list never comes
+    back short if the plugins can't be enumerated for some reason.
+    """
+    global _image_extensions_cache
+    if _image_extensions_cache is None:
+        extensions = set(IMAGE_EXTENSIONS_FALLBACK)
+        try:
+            from PyQt5.QtGui import QImageReader
+
+            for fmt in QImageReader.supportedImageFormats():
+                name = bytes(fmt).decode("ascii", "ignore").strip().lower()
+                if name:
+                    extensions.add("." + name)
+        except Exception:
+            pass
+        _image_extensions_cache = extensions
+    return _image_extensions_cache
+
+
 EXTENSION_GROUPS = {
     "All files": None,
     "Documents": {
         ".doc", ".docx", ".pdf", ".txt", ".rtf", ".odt", ".xls", ".xlsx",
         ".ppt", ".pptx", ".csv", ".md",
     },
-    "Images": {
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".tif",
-        ".tiff", ".ico",
-    },
+    "Images": set(IMAGE_EXTENSIONS_FALLBACK),
     "Music": {".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"},
     "Video": {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm"},
     "Archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".iso"},

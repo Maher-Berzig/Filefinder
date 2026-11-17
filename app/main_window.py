@@ -4,7 +4,7 @@ import sys
 import time
 
 from PyQt5.QtCore import Qt, QSettings, QDate, QDateTime, QSize, QMimeData, QUrl
-from PyQt5.QtGui import QIcon, QKeySequence, QFont
+from PyQt5.QtGui import QIcon, QKeySequence, QFont, QPalette, QColor
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QTableWidget,
@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMenu, QAction, QMessageBox, QGroupBox, QSpinBox, QDateEdit,
     QProgressBar, QStatusBar, QSplitter, QFileIconProvider, QShortcut,
     QCompleter, QApplication, QSystemTrayIcon, QStyle, QToolButton,
-    QFontDialog, QButtonGroup, QListView, QTreeView,
+    QFontDialog, QButtonGroup, QListView, QTreeView, QSizePolicy,
 )
 from PyQt5.QtCore import QFileInfo, QStringListModel
 
@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self._scanned = 0
         self._matched = 0
         self._search_start = 0.0
+        self._last_summary = ""
         self._force_quit = False
         self._initial_folder = initial_folder
         # Set by main.py before any custom font is applied, so "Default"
@@ -81,6 +82,13 @@ class MainWindow(QMainWindow):
         # happens to be active (a previous custom choice) when clicked.
         self._default_font = QFont(
             getattr(QApplication.instance(), "ff_default_font", QApplication.instance().font()))
+
+        # Qt's own style + palette, remembered so "light" mode restores
+        # exactly what the app looked like before dark mode existed.
+        _app = QApplication.instance()
+        self._light_style_name = _app.style().objectName()
+        self._light_palette = QPalette(_app.palette())
+        self._dark_mode = False
 
         self._build_ui()
         self._align_text_edits(Qt.RightToLeft if tr.is_rtl() else Qt.LeftToRight)
@@ -135,6 +143,11 @@ class MainWindow(QMainWindow):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.doubleClicked.connect(self._open_selected)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        # Keep the selected row highlighted in the normal selection colour
+        # even when focus moves to the preview pane (Qt would otherwise
+        # repaint it in the faint "inactive" colour, or not at all), so
+        # the user always sees which file is being previewed.
+        self._sync_table_palette()
 
         self.preview_pane = PreviewPane()
 
@@ -153,6 +166,9 @@ class MainWindow(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status_label = QLabel(tr.get("status_ready", "Ready"))
+        # A very long path must not force the window wider.
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximumWidth(160)
         self.progress_bar.setRange(0, 0)
@@ -244,6 +260,7 @@ class MainWindow(QMainWindow):
         self.location_combo.setToolTip(
             "Tick every folder/drive to search. The list stays open "
             "while you tick - click elsewhere to close it.")
+        self.location_combo.itemRemoved.connect(self._on_location_history_removed)
         self._populate_locations()
         layout.addWidget(self.location_combo, stretch=1)
 
@@ -469,10 +486,17 @@ class MainWindow(QMainWindow):
         #history_row.addStretch(1)
         layout.addLayout(history_row)
 
+        font_theme_row = QHBoxLayout()
         self.font_btn = QPushButton(tr.get("choose_font", "Choose Font..."))
         self.font_btn.setToolTip("Change the font used throughout File Finder.")
         self.font_btn.clicked.connect(self._choose_font)
-        layout.addWidget(self.font_btn)
+        font_theme_row.addWidget(self.font_btn)
+
+        self.theme_btn = QPushButton(tr.get("dark_mode_btn", "Dark/light mode"))
+        self.theme_btn.setToolTip("Switch between the light (default) and dark display modes.")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        font_theme_row.addWidget(self.theme_btn)
+        layout.addLayout(font_theme_row)
 
         default_about_row = QHBoxLayout()
         self.default_btn = QPushButton(tr.get("default_btn", "Default"))
@@ -601,6 +625,7 @@ class MainWindow(QMainWindow):
         self.history_size_label.setText(tr.get("history_size_label", "History size:"))
         self.language_label.setText(tr.get("language_label", "Language:"))
         self.font_btn.setText(tr.get("choose_font", "Choose Font..."))
+        self.theme_btn.setText(tr.get("dark_mode_btn", "Dark/light mode"))
         self.default_btn.setText(tr.get("default_btn", "Default"))
         self.about_btn.setText(tr.get("about_btn", "About"))
 
@@ -624,7 +649,7 @@ class MainWindow(QMainWindow):
             self.location_combo.add_path(drive)
         self.location_combo.add_path(os.path.expanduser("~"))
         for path in self._load_location_history():
-            self.location_combo.add_path(path)
+            self.location_combo.add_path(path, removable=True)
         if selected:
             self.location_combo.set_selected_paths(selected)
 
@@ -658,7 +683,7 @@ class MainWindow(QMainWindow):
             # downstream) shows/uses native "\\" separators instead of
             # a mix of the two.
             folder = os.path.normpath(folder)
-            self.location_combo.add_path(folder, at_top=True)
+            self.location_combo.add_path(folder, at_top=True, removable=True)
             self._remember_location_history(folder)
             paths.append(folder)
         if paths:
@@ -804,6 +829,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self._scanned = 0
         self._matched = 0
+        self._last_summary = ""
         self._search_start = time.time()
 
         self.search_worker = SearchWorker(params)
@@ -875,9 +901,10 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
-        self.status_label.setText(
+        self._last_summary = (
             "Done. Scanned %d items, found %d matches in %s."
             % (scanned, matched, utils.format_seconds(elapsed)))
+        self.status_label.setText(self._last_summary)
 
     def _on_error(self, message):
         self.search_btn.setEnabled(True)
@@ -959,7 +986,25 @@ class MainWindow(QMainWindow):
             self.results_splitter.setSizes([half, total - half])
             self._on_selection_changed()
 
+    def _show_selection_in_status(self, paths):
+        """Full path (folder + file name) of the selected result in the
+        status bar; a count when several rows are selected."""
+        if self.search_worker and self.search_worker.isRunning():
+            return  # the live search progress owns the status bar
+        if len(paths) == 1 and paths[0]:
+            path = os.path.normpath(paths[0])
+            self.status_label.setText(path)
+            self.status_label.setToolTip(path)
+        elif len(paths) > 1:
+            self.status_label.setText("%d files selected" % len(paths))
+            self.status_label.setToolTip("")
+        else:
+            self.status_label.setToolTip("")
+            if self._last_summary:
+                self.status_label.setText(self._last_summary)
+
     def _on_selection_changed(self):
+        self._show_selection_in_status(self._selected_paths())
         if not self.preview_check.isChecked():
             return
         paths = self._selected_paths()
@@ -1357,6 +1402,25 @@ class MainWindow(QMainWindow):
         history = history[: self._history_limit()]
         self.settings.setValue("location_history", history)
 
+    def _on_location_history_removed(self, path):
+        """One folder was deleted with its \"X\" in the Look in drop-down -
+        drop it from the saved history (and from the remembered ticked
+        folders) so it stays gone. The combo has already removed the row."""
+        key = os.path.normcase(os.path.normpath(path))
+
+        def keep(p):
+            return os.path.normcase(os.path.normpath(p)) != key
+
+        history = [p for p in self._load_location_history() if keep(p)]
+        self.settings.setValue("location_history", history)
+        last = self.settings.value("last_locations", [])
+        if isinstance(last, str):
+            last = [last]
+        last = [p for p in (last or []) if p and keep(p)]
+        self.settings.setValue("last_locations", last)
+        self.status_label.setText(
+            "Removed \u201c%s\u201d from the Look in history." % path)
+
     def _on_history_limit_changed(self, value):
         self.settings.setValue("history_limit", value)
         # Trim what's already stored/shown down to the new limit right
@@ -1394,6 +1458,66 @@ class MainWindow(QMainWindow):
 
         self.status_label.setText("History cleared.")
 
+    # ------------------------------------------------------------------
+    # Dark / light mode
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dark_palette():
+        pal = QPalette()
+        window = QColor(45, 45, 45)
+        base = QColor(30, 30, 30)
+        text = QColor(220, 220, 220)
+        disabled = QColor(127, 127, 127)
+        highlight = QColor(42, 130, 218)
+        pal.setColor(QPalette.Window, window)
+        pal.setColor(QPalette.WindowText, text)
+        pal.setColor(QPalette.Base, base)
+        pal.setColor(QPalette.AlternateBase, QColor(40, 40, 40))
+        pal.setColor(QPalette.ToolTipBase, QColor(60, 60, 60))
+        pal.setColor(QPalette.ToolTipText, text)
+        pal.setColor(QPalette.Text, text)
+        pal.setColor(QPalette.Button, QColor(58, 58, 58))
+        pal.setColor(QPalette.ButtonText, text)
+        pal.setColor(QPalette.BrightText, QColor(255, 80, 80))
+        pal.setColor(QPalette.Link, QColor(90, 170, 255))
+        pal.setColor(QPalette.Highlight, highlight)
+        pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        pal.setColor(QPalette.PlaceholderText, QColor(140, 140, 140))
+        for role in (QPalette.Text, QPalette.WindowText, QPalette.ButtonText):
+            pal.setColor(QPalette.Disabled, role, disabled)
+        pal.setColor(QPalette.Disabled, QPalette.Highlight, QColor(80, 80, 80))
+        return pal
+
+    def _sync_table_palette(self):
+        """Selected row keeps the normal selection colour even when the
+        table is not focused (e.g. while the preview pane has focus).
+        Rebuilt from the application palette so it follows the theme."""
+        pal = QPalette(QApplication.instance().palette())
+        pal.setColor(QPalette.Inactive, QPalette.Highlight,
+                     pal.color(QPalette.Active, QPalette.Highlight))
+        pal.setColor(QPalette.Inactive, QPalette.HighlightedText,
+                     pal.color(QPalette.Active, QPalette.HighlightedText))
+        self.table.setPalette(pal)
+
+    def _apply_theme(self, dark):
+        self._dark_mode = bool(dark)
+        app = QApplication.instance()
+        if dark:
+            app.setStyle("Fusion")
+            app.setPalette(self._dark_palette())
+        else:
+            if self._light_style_name:
+                app.setStyle(self._light_style_name)
+            app.setPalette(self._light_palette)
+        utils.set_dark(dark)
+        self._sync_table_palette()
+        self.preview_pane.apply_theme(dark)
+        self._apply_filters_visible(self.filters_box.isVisible())
+
+    def _toggle_theme(self):
+        self._apply_theme(not self._dark_mode)
+        self.settings.setValue("dark_mode", self._dark_mode)
+
     def _choose_font(self):
         current_font = QApplication.instance().font()
         font, ok = QFontDialog.getFont(current_font, self, "Choose UI Font")
@@ -1427,6 +1551,9 @@ class MainWindow(QMainWindow):
         # Appearance
         self._apply_font(self._default_font)
         self.settings.remove("ui_font")
+        if self._dark_mode:
+            self._apply_theme(False)
+        self.settings.remove("dark_mode")
 
         # Search row
         self.mode_combo.setCurrentIndex(0)
@@ -1472,7 +1599,7 @@ class MainWindow(QMainWindow):
             "<p>Built with Python and PyQt5. Live and indexed search, "
             "accent-insensitive and wildcard matching, a PDF/DJVU preview "
             "pane, and native Windows Explorer context menu integration.</p>"
-            "<p>&copy; %s</p>" % (APP_VERSION, time.strftime("%Y")))
+            "<p>%s &copy; Maher Berzig</p>" % (APP_VERSION, time.strftime("%Y")))
 
     def _load_settings(self):
         idx = self.language_combo.findData(tr.lang)
@@ -1526,6 +1653,9 @@ class MainWindow(QMainWindow):
             font = QFont()
             if font.fromString(font_str):
                 self._apply_font(font)
+
+        if self.settings.value("dark_mode", False, type=bool):
+            self._apply_theme(True)
 
     def closeEvent(self, event):
         self.settings.setValue("language", tr.lang)

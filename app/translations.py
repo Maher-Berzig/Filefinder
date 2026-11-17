@@ -94,6 +94,7 @@ translations = {
         "history_size_label": "History size:",
         "language_label": "Language:",
         "choose_font": "Choose Font...",
+        "dark_mode_btn": "Dark/light mode",
         "default_btn": "Default",
         "about_btn": "About",
 
@@ -181,6 +182,7 @@ translations = {
         "history_size_label": "حجم السجل:",
         "language_label": "اللغة:",
         "choose_font": "اختيار الخط...",
+        "dark_mode_btn": "الوضع الداكن/الفاتح",
         "default_btn": "افتراضي",
         "about_btn": "حول",
 
@@ -282,6 +284,7 @@ translations = {
         "history_size_label": "Taille de l'historique :",
         "language_label": "Langue:",
         "choose_font": "Choisissez la police...",
+        "dark_mode_btn": "Mode sombre/clair",
         "default_btn": "Défaut",
         "about_btn": "À propos de",
 
